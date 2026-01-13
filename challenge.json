@@ -1,0 +1,50 @@
+{
+  "challenge_code": "100006",
+  "challenge_name": "School Education - Exam Guard",
+  "usecase_title": "Lack of AI-Enabled Live Proctoring in Online Examinations Leading to Malpractices and Reduced Credibility of Assessments",
+  "timeline": {
+    "launch_date": "20/10/2025",
+    "submission_deadline": "08/12/2025",
+    "shortlisting_date": "11/12/2025",
+    "presentation_date": "15/12/2025",
+    "winner_announcement": "18/12/2025",
+    "poc_deployment": "31/12/2025"
+  },
+  "details": {
+    "title": "AI-Enabled Live Proctoring for Online Examinations",
+    "theme": "AI for Education and Examination Integrity",
+    "department": "School Education Department, Government of Andhra Pradesh",
+    "challenge_teaser": "Help Andhra Pradesh make online examinations fair and tamper-proof! Build an AI-powered system that detects cheating, flags suspicious behavior, and ensures secure and credible assessments across all exam formats.",
+    "challenge_overview": "With the increasing adoption of online and blended examinations, maintaining academic integrity has become a growing challenge. Traditional physical invigilation is not feasible for large-scale remote assessments, allowing students to exploit devices or external support. The absence of AI-based real-time monitoring through CCTV and laptop cameras has reduced the credibility of online examinations. The School Education Department seeks an AI-enabled integrated proctoring solution that combines CCTV, laptop cameras, and microphones to detect and record suspicious behavior in real time. The system should leverage facial recognition, gaze tracking, and voice activity detection to ensure fairness, transparency, and trust in the digital examination process.",
+    "expected_solution": [
+      "AI-Powered Multi-Modal Monitoring: Integrate CCTV and laptop camera feeds with audio input to detect malpractices in real time.",
+      "Anomaly Detection: Use AI/ML to identify multiple faces, absence of candidates, unauthorized materials, or gaze deviations.",
+      "Audio Analytics: Detect and flag background speech or suspicious sounds indicating collaboration or consultation.",
+      "Automated Evidence Capture: Generate tamper-proof logs including flagged snapshots, video/audio clips, and timestamps.",
+      "Real-Time Alerts: Provide instant notifications to human proctors for live intervention during suspicious events.",
+      "Integration: Enable compatibility with existing online exam platforms and CCTV systems through secure APIs."
+    ],
+    "outcomes": [
+      "AI-enabled monitoring system for credible and transparent online examinations.",
+      "Reduced manual effort for human invigilators with automated anomaly detection.",
+      "Comprehensive audit trail and evidence-based decision-making in malpractice cases.",
+      "Enhanced trust and acceptance of digital assessment systems among students and institutions."
+    ],
+    "expected_impact": [
+      "Students Fair and transparent exam environment ensuring equal opportunity for all participants.",
+      "Teachers & Proctors Reduced workload and faster response to incidents through AI-assisted monitoring tools.",
+      "Government & Institutions Strengthened credibility and scalability of the online examination ecosystem."
+    ],
+    "dataset_access": [
+      "Video feeds from laptop and CCTV cameras for behavioral monitoring of candidates.",
+      "Sample photographs of students and invigilators for training facial recognition models.",
+      "Audio streams from microphones to train voice activity detection and background sound analysis."
+    ],
+    "poc_scope": "The proof-of-concept will involve 30 registered candidates seated in one exam hall for 10-minute sessions. Each test will simulate 6–10 controlled malpractice events, including wrong-person seat swaps, to assess detection accuracy.",
+    "poc_success_criteria": [
+      "Out of 10 malpractice events, the system should detect at least 8 accurately.",
+      "AI detection results should match timestamped ground-truth logs recorded by human monitors."
+    ],
+    "data_privacy": "Solutions must comply with privacy, consent, and data retention policies for student video and audio data. Processing should be conducted within secure, isolated networks with explicit consent from all participants."
+  }
+}
