@@ -14,152 +14,205 @@ POSITION: PARTIALLY_AGREE
 
 REASONING:
 
-This is an impressively thorough architecture document that demonstrates real technical understanding of the constraints. The self-critique section (incorporating three adversarial reviews) is genuinely valuable and addresses many of the concerns I would have raised. However, several architectural and practical issues remain.
+This is a remarkably well-thought-out architecture that has clearly benefited from multiple rounds of refinement. The core decisions — local processing, episode-based events, detect→track→verify pipeline, SQLite WAL, no Electron, no YOLO — are all sound. The degradation ladder is clever. The scope cuts are almost all correct. But I have significant concerns about demo-day execution risk and a few architectural choices that could be the difference between winning and losing.
 
 **What works well:**
 
-1. **Edge-first processing is the right call.** No raw video leaving the terminal, JSON events only over LAN — this is architecturally sound for both privacy and bandwidth under 4G constraints.
+1. **The detect→track→verify pipeline** is the right pattern. BlazeFace at 3-5fps with MOSSE tracking in between is an excellent tradeoff for 4GB machines. The 2s verification interval is sensible.
 
-2. **The CPU budget analysis is honest and grounded.** The amortized-per-frame calculation is the right way to think about this, and acknowledging the Celeron problem rather than hand-waving it is credible.
+2. **Episode-based event model** is the right abstraction. Per-frame spam would kill both the network and the dashboard UX. This shows architectural maturity the judges will notice.
 
-3. **The critique synthesis is the strongest section.** The 3-zone hysteresis for face verification, the Silero VAD swap, the revised gaze thresholds — these are all corrections that reflect real-world deployment experience. The scope reduction from 20 features to 6 core features is the single most important decision in the document.
+3. **The degradation ladder** (≥12fps full → ≥7fps shed gaze → ≥4fps shed audio → <4fps SURVIVAL) is practical and demonstrates real systems thinking. However, it needs to be *visible* on the dashboard — judges should see you gracefully degrading, not silently failing.
 
-4. **Store-and-forward for events** is a simple, correct pattern for unreliable network conditions.
+4. **Ground truth logger** built into the admin dashboard is a strategic choice. Making it easy for the jury to log their staged events and immediately see the confusion matrix is a competitive advantage.
 
-5. **The threading model (capture → inference → network)** is the right decomposition for Python's GIL limitation.
+5. **Store-and-forward with JSONL spool** — correct for LAN reliability.
 
-**What doesn't work or needs scrutiny:**
+6. **CLAHE preprocessing** at ~2ms is the right call for classroom lighting variation.
 
-1. **The 10-day schedule is still aggressive.** Days 1-4 cover all AI pipelines. Day 5-6 covers a full React+FastAPI+WebSocket dashboard from scratch. This assumes zero debugging time, zero environment issues, and a team that's already proficient in all these tools. The schedule has no slack whatsoever — every bug that takes longer than expected cascades.
+**What concerns me deeply:**
 
-2. **The multi-modal fusion is described conceptually but not architecturally.** The fusion table says "GAZE_DEVIATION + MULTIPLE_PERSONS = LIKELY COLLABORATION" but there's no specification of the temporal correlation window, the weighting mechanism, or how conflicting signals are resolved. This is where real-world systems break down — and it's allocated 1 day of effort alongside object detection.
+**The PyQt6 decision is the single biggest risk in this architecture.** Here's why:
 
-3. **The "no raw video leaves terminal" claim has a subtle contradiction.** Evidence snapshots are stored locally but "the dashboard can request a specific snapshot via authenticated API call to the terminal." This means the terminal must run an HTTP server accepting inbound connections, which is a non-trivial security surface for what's described as a kiosk-mode exam terminal. This also means the edge server needs to route requests to specific terminals — essentially a reverse proxy or NAT traversal problem on the LAN.
+- You're deploying to *unknown government desktops* that you don't control. PyQt6 needs platform-specific Qt binaries. WinPython portable with PyQt6 is a ~400-500MB distribution that may hit antivirus/group-policy blocks on locked-down government machines.
+- PyQt6 has known issues with webcam integration on certain Windows builds. OpenCV's `VideoCapture` + PyQt6's event loop can deadlock if the threading model isn't exactly right.
+- You're asking 30 terminals to simultaneously run PyQt6 + ONNX Runtime + OpenCV + Silero — on machines that might be Celerons with 4GB RAM. PyQt6 alone consumes 80-150MB.
+- **A browser-based terminal UI (FastAPI serving lightweight HTML/JS) with the AI pipeline as a headless Python process** would be dramatically simpler to deploy, more resilient, and avoids the entire Qt dependency chain. The exam UI is just 10 MCQ questions with a timer and navigation — this is a web form, not a desktop application.
 
-4. **The hash-chain tamper-proof log is security theater in this context.** SHA-256 chain of events is trivially forgeable if the attacker controls the terminal (which they do — it's their computer). Without a trusted hardware module or external time-stamping authority, the hash chain proves nothing. The critique said "jury won't verify it" but it's still in the revised schedule (Day 4). Cut it or be honest about what it provides (integrity against accidental corruption, not adversarial tampering).
+**The 10-day schedule is back-loaded with risk.** Multi-terminal testing doesn't happen until Day 8. That means you discover LAN congestion, port conflicts, firewall issues, and race conditions with only 2 days to fix them. In a hackathon, the #1 cause of demo failure is "worked on one machine, broke at scale."
 
-5. **The CCTV pipeline was correctly cut from hackathon scope, but the document still describes it in extensive detail across Phases 0, 2, and 5.** This creates confusion about what's actually being built. The document should have a clear "what we're building" vs "future production architecture" separation.
+**The audio strategy has a fundamental flaw.** Silero VAD with a 10-second sustained speech threshold will miss almost every real cheating scenario. Students whispering to each other do so in 2-3 second bursts, not 10-second monologues. But dropping to 3-5 seconds will generate false positives from coughs, chair scraping, and ambient noise. The "common-mode audio rejection" (subtracting signals detected across multiple terminals simultaneously) is a good idea but is non-trivial to implement correctly with clock skew across terminals.
+
+**The CCTV omission is a strategic risk.** The challenge document *explicitly* lists "Integrate CCTV and laptop camera feeds" as requirement #1. While the architecture debate correctly identified CCTV as high demo-failure risk, completely dropping it means you're visibly not addressing a stated requirement. Even a minimal "CCTV feed viewer with motion heatmap" on the dashboard — no AI, just display + simple background subtraction — would check this box.
 
 CONCERNS:
 
-1. **PyInstaller + ONNX Runtime + MediaPipe is a known pain point.** MediaPipe has notoriously fragile packaging — protobuf version conflicts, platform-specific shared libraries, and issues with PyInstaller's module discovery. Allocating this to "Day 1, also build PyInstaller test binary" is optimistic. If this fails, the entire deployment model breaks. This should be validated in a spike before committing to the architecture.
+1. **PyQt6 deployment on unknown government machines is the most likely cause of demo-day failure.** Antivirus quarantine, missing Visual C++ redistributables, Windows Defender blocking unsigned executables, group policy restrictions on running portable Python distributions. You have *zero* control over these machines and likely limited time for setup.
 
-2. **30 WebSocket connections to a Raspberry Pi 4 running FastAPI + SQLite under concurrent write load.** Each terminal sends heartbeats every 5 seconds plus event bursts during alerts. SQLite has a single-writer lock. Under a scenario where 10 terminals simultaneously flag alerts (e.g., a loud noise triggers audio alerts across the room), the edge server becomes a bottleneck. SQLite WAL mode helps but doesn't eliminate write contention.
+2. **Multi-terminal testing at Day 8 is too late.** You need at least 3-terminal testing by Day 5. LAN issues (30 terminals pushing JPEG evidence + JSON events to a single FastAPI server) will surface bugs you can't predict: port exhaustion, asyncio backpressure, SQLite WAL write contention under concurrent inserts.
 
-3. **Face verification accuracy claim of 99.55% LFW is misleading in this context.** LFW is a dataset of Western celebrities in controlled conditions. MobileFaceNet performance on Indian demographics, varying skin tones, low-quality webcams, and fluorescent lighting will be substantially lower. The revised 90% target is more honest but still may be optimistic without testing on representative data.
+3. **The gaze baseline calibration is underspecified.** "Yaw >baseline+30°" implies a per-candidate baseline capture during enrollment. How? If the candidate looks slightly left during enrollment, their baseline is skewed. If you use a fixed threshold instead, inter-individual variation in sitting position relative to the webcam will produce systematic false positives for candidates at the edges of the room.
 
-4. **The enrollment flow captures 5 poses ("look left, right, up, down") but the verification runs against the closest of 5 embeddings.** This creates a subtle failure mode: if the student's natural exam posture (looking slightly down at keyboard) doesn't match any enrollment pose well, you get persistent uncertain-zone scores. The enrollment should include a "looking at screen normally" pose as the primary embedding.
+4. **MobileFaceNet with 5 enrollment embeddings may not be robust enough for the "seat swap" scenario.** The challenge specifically mentions seat swaps. If two candidates swap seats (and both are enrolled), the system needs to detect that Terminal A's face now matches Candidate B's enrollment — this requires cross-checking against ALL enrolled embeddings, not just the terminal's own. Is the architecture doing this? If not, you'll miss the marquee demo scenario.
 
-5. **No mention of exam application security.** The terminal runs a Python agent and displays 10 MCQs. How are students prevented from Alt-Tabbing, opening a browser, or killing the proctoring process? Kiosk mode is mentioned in passing (S7) but not designed. On Windows, reliable kiosk lockdown is a non-trivial problem that can consume days.
+5. **30 concurrent webcam captures on a shared USB bus** could be a problem. If these are USB webcams on desktops connected through shared USB controllers or hubs, bandwidth contention could cause frame drops or outright device enumeration failures. This is especially bad on older Celeron machines with limited USB bandwidth.
 
-6. **The adaptive scheduling system (LOW/MEDIUM/HIGH risk modes) creates a detection gap.** In LOW mode, object detection runs every 15th frame (~1fps). A student could pull out a phone, glance at it for 2-3 seconds, and put it away — all within the window where YOLO isn't running. The system wouldn't detect it because by the time risk escalates (via gaze deviation), the phone is gone.
+6. **The 3-zone hysteresis for face mismatch (0.45/0.70 thresholds) needs hardware-specific calibration.** MobileFaceNet cosine distance distributions shift significantly with webcam quality, lighting, and JPEG compression. The thresholds that work in your dev environment may produce either constant false positives or complete misses on exam hall hardware.
 
-7. **Memory estimate of 530MB total is suspiciously low.** Python alone (with imports of numpy, OpenCV, ONNX Runtime, MediaPipe) typically consumes 250-350MB before any model loading. ONNX Runtime's memory pool allocation for inference buffers isn't accounted for. On a 4GB Windows 10 machine with Chrome or Electron also running, you're likely looking at 700MB-1GB for the agent. This needs actual measurement, not estimation.
+7. **No explicit handling of enrollment fraud.** If the wrong person enrolls at a terminal (before the exam starts), the system will happily verify them for the entire exam. The architecture assumes enrollment integrity but provides no mechanism to verify it.
 
-8. **Audio detection in a room of 30 students all typing simultaneously is fundamentally difficult.** Even Silero VAD with conservative thresholds will struggle to distinguish one student whispering from ambient keyboard/mouse noise at 30 terminals. The 60-70% revised accuracy may still be optimistic. The architecture doesn't address the fact that microphone quality on budget desktops varies enormously.
+8. **SQLite WAL under 30 concurrent writers** (if events are pushed to edge server) — WAL mode helps but SQLite still has a single-writer lock. Under burst conditions (30 terminals simultaneously reporting events), you could see `SQLITE_BUSY` errors. Need explicit retry logic with backoff.
+
+9. **The SUSPICIOUS_POSTURE alert (head pitch >30° downward for >10s) will fire constantly** for students who look down to read questions or think. This is a normal exam behavior. Without a way to distinguish "reading the screen" from "looking at phone in lap," this alert type will dominate your false positives and tank your confusion matrix.
+
+10. **No mention of webcam resolution or frame size strategy.** Are you capturing at 640x480? 1280x720? This matters enormously for both BlazeFace accuracy and CPU load. On 4GB machines, 720p frames in a Python process with OpenCV will consume significant memory in the capture buffer alone.
 
 SUGGESTIONS:
 
-1. **Build a vertical slice first (Days 1-3): webcam → face detect → face verify → single alert → dashboard display.** Get one detection type flowing end-to-end before adding more detectors. This de-risks the integration and gives a working demo fallback at any point.
+1. **Replace PyQt6 with a browser-based terminal UI.** Run a lightweight local Flask/FastAPI server on each terminal (or serve the exam UI from the edge server). The exam interface is trivially a web page: 10 MCQ questions, a timer, navigation buttons. The AI pipeline runs as a headless Python process on the terminal. This eliminates the entire Qt dependency chain, makes deployment a matter of "run this .bat file," and the exam UI renders identically everywhere. If you insist on PyQt6, have a browser-based fallback ready as a Day 0 contingency.
 
-2. **Replace the React dashboard with a simpler solution.** For a hackathon, a server-rendered dashboard using FastAPI + Jinja2 templates + HTMX (for live updates) or even Streamlit would cut 2-3 days of frontend development. The jury cares about the detection accuracy, not React component architecture. Use SSE (Server-Sent Events) instead of WebSocket — simpler, unidirectional (which is all you need for dashboard updates), and no connection management complexity.
+2. **Move multi-terminal testing to Day 4-5.** After the vertical slice on Day 3-4, immediately test with 3 terminals. Even if the dashboard isn't pretty yet, verify that events flow correctly from multiple sources concurrently. Discover LAN issues early.
 
-3. **Drop the hash chain entirely.** Use a simple append-only SQLite log with sequential IDs and timestamps. Spend the saved time on threshold tuning and demo rehearsal.
+3. **Add a minimal CCTV integration.** On the edge server, accept an RTSP stream from one camera, display it on the dashboard as a live feed with a simple OpenCV background subtraction overlay (motion highlights). No AI, no detection — just visual display. This takes ~2-3 hours and checks the "CCTV integration" box without risk. Mark it as "Phase 1: visual monitoring; Phase 2: AI-powered body tracking" in the scalability roadmap.
 
-4. **For kiosk mode on Windows, use Windows Assigned Access or a simple AutoHotkey script** that blocks Alt-Tab, Task Manager, and Start menu. Don't try to build custom lockdown — use OS-level tools.
+4. **For seat swaps, implement cross-terminal face matching.** When a FACE_MISMATCH is detected on Terminal A, the edge server should compare the mismatched embedding against all enrolled embeddings across all terminals. If it matches Terminal B's enrollment, flag CONFIRMED_SEAT_SWAP with both terminal IDs. This is a ~30-minute implementation on the edge server and will be a standout moment during the demo.
 
-5. **Add a "calibration exam" step on Day 8-9** where your team runs through all planted malpractice scenarios and records the raw detection scores. Use this data to set final thresholds empirically rather than guessing numbers like "30° yaw" or "0.70 embedding distance." Threshold tuning against actual hardware and lighting conditions will improve accuracy more than any architectural change.
+5. **Drop SUSPICIOUS_POSTURE or redefine it narrowly.** Head pitch alone is too noisy. Either: (a) only fire it when pitch >30° AND the student hasn't interacted with the exam UI for >15 seconds (requires exam UI to report last-interaction timestamps), or (b) cut it entirely and focus on the 5 alerts you can do reliably. 5 high-quality alerts beat 6 alerts where one is a false-positive machine.
 
-6. **For the Raspberry Pi edge server, switch SQLite to append-only JSON lines file** for event logging (one file per terminal). Eliminates write contention entirely. Only use SQLite for the dashboard query layer, populated by a background reader.
+6. **For audio, lower the threshold to 5 seconds but add a minimum energy gate.** Silero VAD + a simple RMS energy threshold above ambient baseline (calibrated during the first 30 seconds of the exam) would let you catch 5-second whispered conversations while rejecting low-energy ambient noise. 10 seconds is too conservative for the demo.
 
-7. **Test MobileFaceNet on your actual team members' faces with the actual demo webcams before Day 3.** If verification accuracy is poor, you have time to switch to InsightFace's buffalo_s model or adjust thresholds. Don't discover this on Day 9.
+7. **Capture at 640x480, not 720p.** Explicitly set `cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)`. This halves the pixel count, reduces memory usage, and BlazeFace is designed for this resolution range. On Celerons, this could be the difference between hitting 12fps and hitting 6fps.
+
+8. **Add a "system health" pre-exam check** — a 30-second automated diagnostic that verifies webcam capture, microphone input, model inference speed, and network connectivity to the edge server. Display pass/fail on each terminal. Run this before every demo session. This both prevents embarrassing failures and demonstrates operational maturity to judges.
+
+9. **Pre-bake a fallback video demo.** On Day 9, record a flawless 3-minute screen capture of the entire flow working: enrollment → exam → malpractice detection → dashboard alerts → confusion matrix. If anything fails on demo day, you can narrate over the video while fixing the issue. This is standard hackathon survival strategy.
+
+10. **Add a one-slide "10,000 center scalability" architecture diagram.** Show how the edge-server-per-hall model scales: each hall is autonomous, metadata aggregates to a district/state dashboard via 4G. Include cost breakdown (~₹25,000 for mini-PC + SSD + CCTV camera per hall). This addresses the jury's scalability evaluation criterion directly.
 
 KEY_TRADEOFFS:
 
-1. **Native app vs. browser-based:** The proposal chooses a Python native agent (PyInstaller) over a browser-based solution. This gives better webcam access and model performance but creates a massive deployment and packaging risk. If PyInstaller builds fail on the target OS, there's no fallback. A browser-based approach with WebAssembly ONNX Runtime would be slower but zero-install. **The native choice is correct for accuracy but the packaging risk is under-weighted.**
+1. **PyQt6 native app vs browser-based UI:** The proposal chose PyQt6 to save RAM (no Electron), but this trades deployment simplicity for memory efficiency. On 4GB machines, the RAM savings matter — but if the app won't *launch* due to deployment issues, the RAM savings are irrelevant. A lightweight local web server + browser tab would use ~150-200MB (less than Electron's 300-500MB) while being dramatically easier to deploy. **I believe this is the wrong tradeoff for a hackathon on unknown hardware.**
 
-2. **Precision over recall:** The revised architecture explicitly optimizes for fewer false positives at the cost of missed detections. This is the right tradeoff for a demo where every false alarm undermines credibility — but it means the "8/10 detection" target depends heavily on what those 10 planted events are. If they include subtle cheating (quick glance at a phone under the desk), the system will miss them.
+2. **Cutting CCTV entirely vs. minimal integration:** The proposal correctly identified CCTV AI processing as high-risk, but went too far by cutting it entirely. A "display-only" CCTV feed on the dashboard costs almost nothing and satisfies a stated requirement. **The tradeoff of zero CCTV risk vs. zero CCTV compliance is too aggressive.**
 
-3. **Local processing vs. cloud offload:** Processing everything on-terminal avoids network dependency and privacy concerns but means performance is capped by the worst hardware (Celeron). The architecture has no graceful degradation path — if a Celeron terminal can't keep up, it just drops frames and misses events. A hybrid approach where the edge server picks up overflow processing would be more resilient but significantly more complex.
+3. **6 alert types vs. fewer, higher-quality alerts:** The proposal includes SUSPICIOUS_POSTURE which will likely be the noisiest alert. The tradeoff is coverage breadth vs. confusion matrix quality. Given that the jury *explicitly* wants minimal false positives and will compute a confusion matrix, **a false-positive-generating alert type is worse than no alert at all.** Cut or significantly constrain it.
 
-4. **Scope ambition vs. execution risk:** Even after the scope reduction, the plan calls for 6 AI models, a full-stack dashboard, a multi-threaded Python agent, edge server aggregation, and WebSocket communication — all in 10 days. The document acknowledges this implicitly by having zero buffer days. **The right tradeoff would be to cut one more feature (audio VAD) and allocate Day 9 entirely to threshold tuning and demo rehearsal instead of integration testing, which should be continuous from Day 5 onward.**
+4. **Episode-based events vs. per-frame reporting:** This is the **right** tradeoff. Episode-based reduces network load, simplifies the dashboard, and produces cleaner evidence. The cost is slightly delayed initial detection (need to accumulate frames before declaring an episode), but 3-5 seconds of delay is invisible in a proctoring context.
 
-5. **Document comprehensiveness vs. actionability:** The document is extremely detailed (~4000 words) which is valuable for alignment but risks analysis paralysis. For a hackathon, a 1-page "what we're building" + a 1-page "how it works" + code would be more actionable than this 20-page specification. The time spent writing and reviewing this document is time not spent coding.
+5. **Local-only processing vs. cloud-assisted:** This is the **right** tradeoff for the demo. No cloud dependency means no demo-day failure from bad internet. The scalability story (local processing per hall, only metadata to cloud) is actually *more* compelling to a government buyer than a cloud-dependent architecture.
+
+6. **Conservative thresholds vs. aggressive detection:** The proposal leans conservative (10s audio, 30s gaze, 3-zone hysteresis). For a hackathon demo with *staged* malpractice events (which will be obvious and sustained), slightly more aggressive thresholds would catch more events. The risk is that if the jury's staged events are subtle or brief, conservative thresholds will miss them. **Tune thresholds for the demo scenario (staged, obvious events), not for production (subtle, adversarial events).** You can always tighten them later.
+
+7. **Schedule back-loading:** The proposal front-loads individual component development and back-loads integration testing. This is the **wrong** tradeoff for a hackathon. Integration issues are the #1 killer. A vertical slice by Day 3-4 is good, but multi-terminal testing needs to happen by Day 5, not Day 8.
 
 ### GPT-5.2
 
 POSITION: PARTIALLY_AGREE
 
 REASONING:
-The core architectural direction—**on-terminal inference + edge aggregation + dashboard**—is the right shape for your constraints (4G unreliability, low budget, privacy expectations, and the need for low alert latency). Keeping raw video on the terminal and sending only events is also the only way this is viable on 4G and with 30 endpoints.
+The core shape (terminal-side lightweight inference + edge-side aggregation/dashboard + episode-based alerts + no raw video uplink) is architecturally sound for a 7–10 day hackathon demo. It optimizes for the two things that usually kill demos: unstable networks and over-ambitious real-time video streaming.
 
-Where the proposal becomes less sound is in (a) **operational reliability** and (b) **overconfidence in some detectors/claims** on low-end CPUs and messy exam conditions. The revised “hackathon scope reduction” is a material improvement: dropping CCTV/ReID/adaptive scheduling for the demo increases the chance of a stable end-to-end system.
+What works and is likely to impress the jury:
+- **Episode-based events + evidence-on-demand**: This directly addresses the explicit “minimize false alarms” guidance and keeps the dashboard usable.
+- **Degradation modes**: Very pragmatic for unknown CPU/webcam quality; also a strong “scalability story.”
+- **Ground-truth logger + confusion matrix**: This is unusually aligned with the evaluation rubric; most teams will hand-wave metrics.
+- **No cloud dependency**: Strong government-friendly operational narrative (DPDP/privacy, cost, offline resilience).
 
-Architecturally, the biggest maintainability/scalability risk is that you’re building **three products at once** (exam UI, proctoring agent, edge/backend/cloud dashboard) with a lot of real-time behavior and hardware variance (webcams/mics/OS). You can still win the hackathon, but you need to narrow the “must work flawlessly” surface area further and design for failure (time sync, reconnect, local-only mode).
+Where it’s not “battle-ready” yet is not the model choices—it’s the **demo-day operational risk** and a couple of spec-expectation gaps:
+- The official spec expects **CCTV integration** and **tamper-proof logs**. You can downscope these, but you must still show *something credible* or risk losing points to teams that demo even a thin “integration stub.”
+- The “8/10” target is achievable only if you **control false positives**. Your current alert set includes two high-FP candidates in real classrooms: **gaze** and **posture** (especially posture). If FPs flood the proctor view, you’ll lose even if you catch 8/10 staged events.
+
+Scope vs team/time:
+- For **1 developer**: this is too much (PyQt exam app + multi-threaded AI + store/forward + time sync + edge server + dashboard + evidence viewer + fusion + metrics). You’ll end up with many “almost done” components.
+- For **2 developers**: feasible if you lock the vertical slice by Day 4 and aggressively cut anything that doesn’t increase the probability of hitting 8/10 with low FP.
+
+Biggest differentiation vs “everyone uses MediaPipe/MobileFaceNet”:
+- Not the models—**the evaluation harness** is your moat: episode semantics, live ground-truth capture, confusion matrix, and “degradation transparency” (showing when/why the system sheds modalities). That looks like a deployable product rather than a model demo.
 
 CONCERNS:
-1. **Edge/cloud split is underspecified and risky under 4G.** If the “State dashboard” is required for the primary view, a 4G drop kills visibility. For the hackathon, you should assume 4G fails and still be fully functional on LAN.
-2. **Timestamp accuracy for confusion matrix is a hidden failure mode.** Terminals will have clock drift; matching ground truth within ±15s can look “bad” purely due to time skew. Without time synchronization, your scoring can be unfairly penalized.
-3. **Python + MediaPipe Face Mesh on Windows can be a deployment trap.** MediaPipe wheels and camera backends are a common source of last-minute failure (build issues, DLL conflicts, camera capture bugs). This is a bigger risk than model accuracy.
-4. **CPU budget math is optimistic on “basic desktops” and ignores contention.** Real terminals run OS services, exam UI, antivirus, background updates. Peaks (GC, thread contention, ONNX thread pools) will cause bursty latency and false “absent/no face” events.
-5. **“Evidence snapshots never transmitted” conflicts with “dashboard can request snapshot.”** That is still transmission; it also creates an inbound path to terminals (auth, replay protection, and network routing issues).
-6. **Local evidence can be tampered with by the candidate unless kiosk/OS lockdown is real.** If students have any way to access filesystem/task manager, “stored locally” is not defensible even for a demo.
-7. **Face verification threat model gaps:** no liveness/spoof mitigation. A printed photo/phone screen in front of camera can defeat basic embedding checks in a demo scenario if someone tries.
-8. **Gaze/head-pose as “malpractice” is intrinsically high-FP.** Even with improved thresholds, head-pose ≠ eye gaze; students look down to think/read. This can still flood alerts unless you treat it as low-severity signal used only for fusion.
-9. **Audio VAD in a lab ≠ exam hall.** Even Silero can misbehave with fans/echo; mic quality varies drastically. Audio should be opt-in for scoring (don’t let it dominate FP count).
-10. **Ultralytics YOLOv8 licensing (AGPL) may be a compliance issue for “govt deployment” narratives.** Hackathon is fine, but don’t overclaim deployability without acknowledging AGPL obligations.
-11. **WebSocket-only reliability is incomplete.** You mention store-and-forward, but you also need message IDs + acking semantics end-to-end or you’ll get duplicates/out-of-order events that break fusion logic and reporting.
-12. **The plan assumes uniform hardware access (mic/webcam allowed).** Many exam centers disable audio devices or block camera permissions; you need graceful degradation without “everything turns red.”
+1. **Single most likely demo-day failure: deployment/device I/O (webcam+mic+ONNX) on unknown Windows machines.**  
+   - OpenCV camera index issues, DirectShow quirks, mic permissions, missing VC++ runtimes, CPU lacking AVX, ONNXRuntime provider mismatch—any one of these can stall the entire hall demo.
+2. **CCTV integration is fully cut, but the challenge explicitly lists it as a component.**  
+   - Even if the orientation deprioritized facial privacy from CCTV, the jury may still score “integration readiness.” A hard “we don’t do CCTV” can be a points loss relative to competitors.
+3. **“Tamper-proof logs” is in the spec; you cut hash-chaining.**  
+   - For hackathon you don’t need blockchain—yet you need at least a minimal tamper-evident story or you look incomplete.
+4. **SQLite under concurrent writes (30 terminals) can stall or wedge without careful write serialization.**  
+   - WAL helps, but contention plus a naive “write on every event” can still bite. Demo-day failures here look like “dashboard lag” or missing events.
+5. **Timestamp accuracy risk is underestimated.**  
+   - Ground-truth matching depends on consistent clocks and deterministic buffering. Multi-threaded capture + inference + network retries can easily introduce 2–10s skew unless you standardize “event time = capture time” and carry offsets properly.
+6. **GAZE_DEVIATION and SUSPICIOUS_POSTURE are likely FP generators in real exam posture/camera placements.**  
+   - Low webcams, students naturally looking down to read questions, different seating heights, glasses glare—these create noisy head-pose estimates. High FP directly conflicts with “minimize false alarms.”
+7. **Audio VAD without robust hall-noise handling can cause “everyone is flagged” moments.**  
+   - Fan noise won’t trigger Silero VAD much, but classroom speech, announcements, and neighbor talk can. Your common-mode rejection helps, but the thresholding needs to be extremely conservative for the demo.
+8. **CSRT can be too heavy; tracker failures cascade into face mismatch false alarms.**  
+   - If tracking drops frequently, you’ll over-trigger re-verification and can oscillate between uncertain/mismatch.
+9. **Push “encrypted JPEG” is easy to promise and hard to implement correctly in 7–10 days.**  
+   - If you don’t actually encrypt in transit/at rest, don’t claim it; the jury may ask.
+10. **1–2 fps gaze estimation is a red flag for “real-time.”**  
+   - Even if architecturally acceptable, the dashboard experience may look laggy unless you message it correctly (episode-based, not per-frame).
 
 SUGGESTIONS:
-1. **Make the edge server the primary dashboard host (LAN-first), cloud optional.** For hackathon: run React+backend on the edge box, and optionally mirror summarized events to cloud when 4G is available. This removes the biggest demo-killer.
-2. **Implement time sync explicitly.** At session start, edge provides a time offset; terminals timestamp events using `edge_time = local_time + offset`. Store both local and edge-derived timestamps.
-3. **Simplify the agent pipeline with “detect → track → verify” to cut CPU.** Run BlazeFace at lower rate (e.g., 5–10 fps), then track the face ROI between detections (KCF/CSRT or simple optical flow). This reduces “no face” flicker and CPU spikes.
-4. **Treat gaze as a supporting signal, not a primary alert.** For the demo, only escalate gaze if corroborated (e.g., gaze + multi-face OR gaze + sustained absence). This protects your FP rate.
-5. **Fix the evidence architecture consistency.** Either:
-   - (a) “Never leaves terminal” → dashboard cannot fetch it; only local invigilator can export via USB, OR
-   - (b) “On-demand retrieval” → then encrypt-in-transit (TLS), strong auth, and store a copy on edge to prevent terminal tampering.
-6. **Do kiosk/lockdown minimally but explicitly.** Even for demo: auto-start agent full-screen, disable task switching where possible, restrict file explorer access, and store evidence in an admin-only directory.
-7. **Add sequence numbers + idempotency keys to events.** Edge should dedupe by `(terminal_id, sequence_no)` and persist raw events before fusion.
-8. **Reduce components for hackathon reliability:** avoid Electron unless you must. A single PyInstaller agent + separate web dashboard is enough; keep the “exam UI” extremely simple or mocked.
-9. **Add basic spoof resistance for face verification (cheap checks).** Examples: require slight head movement during enrollment (challenge), detect flat-image artifacts (lack of 3D landmark depth variation), or at least require blink/mouth movement using Face Mesh landmarks during verification.
-10. **Define degradation modes.** If mic fails → disable audio alerts; if face mesh fails → disable gaze; if FPS drops below threshold → reduce workload and only do face presence + multiface.
+1. **Do a thin “CCTV integration stub” (2–4 hours, not a full product):**
+   - Edge server ingests RTSP/USB camera feed (even a laptop webcam pointed backward) and runs **background subtraction + person-count blobs** or simple motion heatmap.
+   - Expose `/cctv/status` + one alert type like **AISLE_ACTIVITY** or **GROUP_MOVEMENT**.  
+   - The goal is scoring + narrative (“we integrate CCTV, privacy-safe because back-facing, and we only emit metadata”), not perfect detection.
+2. **Add minimal tamper-evidence with hash chaining to satisfy the spec (1–2 hours):**
+   - For each JSONL event: `hash_i = sha256(hash_{i-1} + canonical_json(event))`
+   - Store `hash_i` in the line. This gives a credible “tamper-evident log” story without heavy infra.
+3. **Cut or gate posture for the demo to protect FP rate:**
+   - Make **SUSPICIOUS_POSTURE** “fusion-only” (requires POSTURE + prolonged ABSENT-from-face-center or POSTURE + GAZE), or keep it disabled unless the jury explicitly stages “phone in lap.”
+4. **Make gaze calibration explicit and short:**
+   - First 10 seconds: collect baseline yaw distribution while candidate looks at screen. Use robust stats (median + MAD) instead of a single baseline value.
+   - Also cap how often gaze can alert (cooldown) to prevent alert storms.
+5. **Prioritize the 4 alerts that most reliably hit staged scenarios:**
+   - CANDIDATE_ABSENT, MULTIPLE_PERSONS, FACE_MISMATCH, (conservative) SUSPICIOUS_AUDIO.  
+   - Treat gaze as “bonus” unless you can prove low FP in the actual room.
+6. **SQLite: enforce single-writer queue on the edge server:**
+   - One async task/thread that batches inserts every 250–500ms.
+   - Everything else publishes to an in-memory queue. This avoids demo-day “database locked” surprises.
+7. **Timestamping: standardize on capture-time + server offset:**
+   - Terminal stamps `t_capture_monotonic` and `t_capture_wall` (if available).
+   - Periodically measure `(server_time - terminal_wall_time)` with RTT compensation; store offset and include both raw and corrected times in events.
+8. **Deployment strategy: pick the option with the fewest unknown dependencies**
+   - For hackathon reality: **WinPython portable** (with pinned wheels, ONNXRuntime included, OpenCV included) is often safer than PyInstaller when you can’t predict DLL/runtime issues.
+   - Keep a “device diagnostic” executable/script that tests: camera open, mic open, ONNX inference, write permissions, LAN reachability—this should be your Day 0 gate.
+9. **Differentiate in the demo script, not just architecture:**
+   - Show “Degradation Status” tile live (CPU load/FPS → which modalities are active).
+   - Run a 10-minute session, then immediately show confusion matrix populated from your ground-truth logger. Many teams won’t have that closed loop.
 
 KEY_TRADEOFFS:
-- **Privacy vs evidentiary robustness:** keeping all images local improves privacy/bandwidth but makes evidence easier to tamper with and harder to centralize for review. For a credible proctoring system, edge-side evidence retention is usually the pragmatic compromise.
-- **Precision vs recall:** your revised thresholds bias toward precision (good for hackathon scoring), but you may miss subtle cheating. This is the correct trade for a 10-minute judged demo where FPs are very visible.
-- **Feature breadth vs demo reliability:** the original plan optimizes for completeness; the revised scope optimizes for “works live.” The latter is the right tradeoff for the hackathon, but only if you also simplify deployment and remove cloud dependence.
-- **Terminal-heavy compute vs operational simplicity:** local inference avoids network bottlenecks but increases hardware variance risk. You mitigate this by tracking, lowering FPS, and making detectors optional based on capability checks.
+- **You traded model sophistication for operational reliability (good for hackathon).** The right call—winning is about a working end-to-end system with credible metrics, not best-in-class CV.
+- **You traded full compliance scope (CCTV + tamper-proof) for speed (risky).** This is the main strategic risk: even a thin stub would reduce scoring downside.
+- **You traded continuous monitoring for episode semantics (good).** This reduces alert spam and makes the dashboard usable, aligning with “minimize false positives.”
+- **You traded “catch everything” for “catch staged events reliably.”** That’s correct for ≥8/10, but only if you aggressively control FP-heavy modalities (gaze/posture/audio) and ensure timestamp integrity.
 
 ### Gemini 3 Pro
 
 POSITION: PARTIALLY_AGREE
 
 REASONING:
-The architecture correctly identifies that **edge-based inference** is the only viable approach given the 4G bandwidth constraint. Streaming 30 webcams to the cloud would require ~15-30 Mbps steady uplink, which is unrealistic for rural centers. By pushing inference to the client, you solve the bandwidth issue.
+The architecture is technically sound for the hardware constraints (i5/4GB RAM) and correctly identifies bandwidth as a bottleneck by processing locally. The "Fusion Rules" at the Edge Server are a winning differentiator—they directly address the "Low False Positive" requirement from the orientation. Dropping Electron for PyQt6 saves crucial RAM.
 
-However, the proposal underestimates the **resource contention on the client terminals** (specifically the Celeron/4GB constraint). Running an Electron app (which is essentially a Chrome browser instance) alongside a Python process loading four neural networks (MediaPipe, MobileFaceNet, YOLO, Silero) is extremely risky on a dual-core Celeron. You risk UI freezing, which disrupts the exam and causes panic.
-
-Furthermore, the **Raspberry Pi 4 as an Edge Server** is a single point of failure and a performance bottleneck if it is expected to handle SQLite writes for 30 concurrent terminals *plus* potentially process CCTV streams. SD card I/O latency will likely cause write-locks during high-traffic events (e.g., exam start/end).
+However, the proposal carries **existential operational risks** regarding deployment and audio physics that could cause a total demo failure. The plan relies on `WinPython` portable setups working flawlessly on 30 unknown machines, which is optimistic. Additionally, processing audio on 30 terminals in a single room without advanced noise cancellation/source separation will likely trigger `SUSPICIOUS_AUDIO` on *everyone* whenever *anyone* speaks, destroying your precision metrics.
 
 CONCERNS:
-1.  **Electron + Python Memory Overhead:** Electron apps often consume 300MB–600MB RAM idle. The Python runtime + ONNX models + Frame Buffers will take another ~500MB. On a 4GB Windows machine (where OS takes 1.5GB–2GB), you are hitting the swap file. Swapping causes frame drops and UI lag, ruining the student experience.
-2.  **Raspberry Pi SD Card I/O:** SQLite on an SD card with 30 concurrent writers (via the API) is a recipe for database locks or corruption. If the Pi hangs, the dashboard goes dark, even if terminals are working.
-3.  **Audio False Positives (Cross-talk):** In a room with 30 terminals, if one student coughs or drops a pen, 5-6 nearby terminals will trigger the VAD. The current "per-terminal" logic will flag innocent students constantly.
-4.  **CCTV Processing on Pi:** The proposal mentions extracting/processing CCTV frames on the Edge Server. Decoding a 1080p RTSP stream and running YOLO on a CPU-based Pi 4 will consume 100% of its CPU, starving the critical API/WebSocket aggregation tasks.
-5.  **PyInstaller Anti-Virus Triggers:** Heuristically, unsigned PyInstaller binaries behaving like spyware (capturing screen, webcam, keyboard hooks) are often flagged by Windows Defender or institutional AVs, blocking the exam start.
+1.  **Deployment "Dependency Hell" (Critical):** relying on `WinPython` requires the target machines to have specific VC++ redistributables and driver states. If 5 out of 30 machines fail to launch due to a missing DLL, you start the demo in panic mode.
+2.  **Audio "Crosstalk" False Positives:** In a quiet room with 30 mics, one person talking can trigger VAD on neighbor terminals. If the "Common-mode audio reject" isn't perfectly tuned (hard to do in 2 days), you will flag innocent students.
+3.  **PyQt6 UI Velocity:** You have 1-2 developers. Building a functional, decent-looking "Exam Interface" (MCQ rendering, timer, navigation) in PyQt6 takes 3x longer than HTML/CSS. You risk running out of time on the *exam* part, making the *proctoring* look useless.
+4.  **CCTV Compliance Gap:** The challenge explicitly asks for CCTV integration (Component 1). Cutting it entirely ("high demo-failure risk") is a strategic gamble. If a judge insists on seeing the CCTV feed on the dashboard, you have zero answer.
+5.  **Ground Truth Synchronization:** You need to match AI logs to human logs to prove 8/10 accuracy. If the human logger (you) and the system clocks are off by even 2 seconds, your "Confusion Matrix" will be invalid.
 
 SUGGESTIONS:
-1.  **Ditch Electron for the Agent:** Use a lighter UI framework for the Python agent (e.g., `PyQt6` or a simple system tray app that launches the system default browser for the exam). This saves ~300MB RAM.
-2.  **"Common Mode Rejection" for Audio:** Implement logic on the Edge Server: If >3 terminals report `SUSPICIOUS_AUDIO` within the same 500ms window, classify it as "Ambient Noise" and ignore it for all of them. Only flag isolated audio events.
-3.  **Remove CCTV Processing from Edge Server:** Make the Pi strictly a **message broker** (using NATS or Mosquitto) and a log aggregator. Do not run computer vision on the Pi. If CCTV is needed, just record to disk and upload post-exam.
-4.  **Async/Batch Writing:** On the Edge Server, do not write to SQLite synchronously on every HTTP request. Use a queue (Redis or in-memory Python queue) and a background worker to batch-write events to the DB to prevent I/O blocking.
-5.  **Watchdog Process:** The agent needs a separate, tiny watchdog process that restarts the main AI process if it crashes or freezes, ensuring the exam UI remains responsive even if the AI subsystem dies.
+1.  **Switch to PyInstaller (`--onedir` mode):** Do not rely on WinPython. Build a self-contained executable that bundles *everything*. Test this on a fresh Windows sandbox immediately.
+2.  **Implement "Loudest-Mic-Wins" or Drastic Audio Gating:** For the audio fusion, the Edge Server should compare timestamps of VAD triggers. If Terminal A and Terminal B trigger within 100ms, but Terminal A's amplitude is higher, ignore Terminal B. Or, simplify: Only flag audio if it persists >10s *and* is validated by lip movement (face mesh).
+3.  **Hybrid UI (Webview):** Consider using `PyQt6.QtWebEngineWidgets` to render the Exam MCQs using local HTML/JS. Keep the AI in Python, but let the UI be simple HTML. This speeds up "Exam" development significantly.
+4.  **Fake the CCTV Stream:** Do not process CCTV for AI, but *do* ingest the RTSP stream and display it on the Dashboard. This checks the "Integration" box without the AI risk.
+5.  **Automated Ground Truth:** Build a "Malpractice Trigger" app for the actors. When an actor commits "Gaze Deviation," *they* press a hidden button (or use a remote clicker) that logs the *exact* intended malpractice time to the Edge Server. Do not rely on a human observer to log 30 people manually.
 
 KEY_TRADEOFFS:
-**Client-Side Load vs. Bandwidth:** You are trading network stability for CPU/RAM stability. This is the right choice for the context, but it necessitates aggressive code optimization (INT8 quantization, frame skipping) to prevent the hardware from choking.
-
-**Privacy vs. Auditability:** By not streaming video, you gain privacy compliance and bandwidth, but you lose the ability to "replay" the exam for a manual audit later. The "Evidence Snapshot" feature is a necessary compromise, but if a student disputes a "Gaze Deviation" alert, a single static image may not prove they were actually looking at a neighbor.
+**PyQt6 vs. Web:** You are trading development speed (Web is faster) for system resource control (PyQt is lighter). Given the 4GB RAM constraint, this is the **correct** tradeoff, provided you keep the UI very simple.
+**Fusion vs. Raw Speed:** You are delaying alerts by 5-10 seconds to process "Fusion Rules" (e.g., waiting for Gaze + Audio). This trades "instant" alerting for "accurate" alerting. This is the **correct** tradeoff for winning; judges hate flashing red lights that mean nothing.
+**Edge Server vs. Cloud:** You are trading scalability (harder to set up LAN) for reliability (immune to bad internet). This is the **winning** tradeoff for a live demo in India.
 
 ---
 ## Round 2
@@ -172,336 +225,482 @@ POSITION: PARTIALLY_AGREE
 
 REASONING:
 
-After reviewing GPT-5.2 and Gemini 3 Pro's feedback, my position remains PARTIALLY_AGREE but with **stronger conviction on several concerns** that all three of us independently identified, and with some refinements to my suggestions.
+After reviewing both GPT-5.2 and Gemini 3 Pro's feedback, I'm struck by the strong convergence across all three reviewers on the critical issues. My position hasn't fundamentally changed, but several arguments have sharpened my thinking and I want to update accordingly.
 
-**Where all three reviewers converge (high-confidence issues):**
+**Where all three reviewers converge (high-confidence consensus):**
 
-1. **The evidence architecture contradiction is real and unresolved.** All three of us flagged that "no raw video leaves the terminal" directly conflicts with "dashboard can request snapshots via API." GPT-5.2 correctly frames the fix as a binary choice: either truly local-only (USB export by invigilator) or explicit on-demand retrieval with proper security. I now favor GPT-5.2's option (b) — on-demand retrieval with TLS and edge-side copy — because for a hackathon demo, the jury needs to see evidence from the dashboard. But the proposal must stop claiming "nothing leaves the terminal."
+1. **CCTV must have a minimal stub.** All three of us flagged this independently. GPT-5.2's framing is the most precise: a 2-4 hour RTSP ingest + background subtraction + motion heatmap on the dashboard. This isn't optional — it's a stated requirement, and having *zero* answer when a judge asks "where's the CCTV?" is an unforced error. I fully endorse this as a must-do.
 
-2. **Memory pressure on 4GB Celeron machines is the #1 deployment risk.** Gemini's breakdown is more precise than mine was: Electron (300-600MB) + Python+ONNX+models (~500MB) + Windows (~1.5-2GB) = swap thrashing. My original estimate of 530MB for the agent was too conservative; Gemini's ~500MB for just the Python side is more realistic when you account for ONNX Runtime's inference buffers. **I now agree with Gemini: drop Electron entirely.** Use PyQt6 or even a tkinter-based minimal UI for the exam MCQs, keeping everything in one Python process. This saves 300-500MB and eliminates an entire deployment dependency.
+2. **SUSPICIOUS_POSTURE is a false-positive bomb.** All three of us identified this. GPT-5.2's suggestion to make it fusion-only (require POSTURE + GAZE or POSTURE + absence-from-face-center) is the best mitigation I've seen. I retract my earlier suggestion to drop it entirely — making it fusion-only preserves coverage while protecting the confusion matrix. This is a better answer.
 
-3. **MediaPipe/PyInstaller packaging is a critical-path risk.** GPT-5.2 and I both flagged this. Gemini adds the AV false-positive angle which I missed — unsigned PyInstaller binaries that access webcams genuinely do get flagged by Windows Defender. This needs a Day-0 spike, not a Day-1 afterthought.
+3. **Audio crosstalk in a single room is a physics problem, not a software problem.** Gemini's point about 30 mics in one room is devastating and I underweighted it in my initial review. My suggestion of lowering the threshold to 5 seconds would actually make this *worse*. I now think the audio strategy needs a more fundamental rethink: either (a) Gemini's "loudest-mic-wins" amplitude comparison at the edge server, or (b) GPT-5.2's suggestion to keep audio extremely conservative and treat it as "bonus" detection. For the demo specifically, given that the jury will stage events in a single room, audio will be the noisiest channel. I'd now recommend: keep the 10s threshold, add amplitude-based common-mode rejection at the edge, and treat SUSPICIOUS_AUDIO as a low-priority alert that contributes to fusion but rarely fires standalone. **I was wrong to suggest lowering to 5 seconds.**
 
-4. **Timestamp synchronization is a genuine scoring threat.** GPT-5.2 raised this and I should have caught it. If terminals have clock drift of even 5-10 seconds (common on machines that haven't synced NTP recently), the ±15-second ground-truth matching window becomes unreliable. This directly affects the confusion matrix — the one metric the jury explicitly requested. Simple fix: edge server provides reference time at session start, terminals apply offset. Low effort, high impact.
+4. **Deployment on unknown machines is the #1 demo-day risk.** Universal agreement. However, I now disagree with Gemini's PyInstaller suggestion.
 
-**Where I've updated my thinking based on others' feedback:**
+**Where I disagree with the other reviewers:**
 
-- **GPT-5.2's "detect → track → verify" suggestion is excellent.** Running BlazeFace at 5-10fps then using lightweight ROI tracking (even simple centroid tracking) between detections would cut CPU by 30-40% while reducing "face absent" flicker from frame drops. This is architecturally cleaner than the proposal's fixed-frequency scheduling.
+1. **Gemini's PyInstaller recommendation is wrong for this scenario.** PyInstaller `--onedir` bundles everything into a single directory, yes — but it also bundles the Python interpreter, and the resulting package for this stack (PyQt6 + ONNX Runtime + OpenCV + Silero + numpy + scipy) would be 800MB-1.2GB per terminal. Deploying that to 30 machines over LAN is a significant time cost. Worse, PyInstaller is notorious for antivirus false positives — the bootloader executable gets flagged by Windows Defender more often than a plain Python distribution. WinPython portable, while imperfect, at least lets you debug dependency issues interactively. **My updated recommendation: WinPython portable as primary, with a pre-built PyInstaller `--onedir` as a fallback on a USB drive. Test both on Day 0.**
 
-- **Gemini's "common mode rejection" for audio is the right pattern.** If 3+ terminals trigger audio alerts in the same 500ms window, it's ambient noise, not individual cheating. This should be implemented at the edge server and is straightforward — just a sliding window comparison of audio event timestamps across terminals. This addresses my concern #8 about audio in noisy rooms more elegantly than simply raising thresholds.
+2. **I'm softening on PyQt6 vs. browser-based UI, but not retracting.** Gemini's `QtWebEngineWidgets` suggestion is clever but actually makes things worse — QtWebEngine adds ~200MB to the distribution and is essentially bundled Chromium, giving you the worst of both worlds. GPT-5.2 didn't push hard on the UI question. I still believe a browser-based exam UI served from the edge server (with the AI pipeline as a headless process) is the lower-risk path for deployment. But I acknowledge that PyQt6 gives you tighter control over webcam/mic access without browser permission dialogs, which matters for the demo. **Updated position: if the team has PyQt6 experience, keep it but build the exam MCQ portion as a simple QWebEngineView-free layout (just QRadioButtons + QPushButtons). If the team is more comfortable with web, switch to browser-based. The deciding factor is team familiarity, not architecture.**
 
-- **GPT-5.2's suggestion to treat gaze as supporting-only signal is correct.** I previously suggested cutting audio to save time; I now think gaze should be *demoted* instead (never fire standalone alerts, only boost other signals). Gaze deviation has the highest false-positive risk of any detector in the system, and a standalone gaze alert during the demo — where the jury watches a student merely thinking — would undermine credibility. Audio with common-mode rejection is actually more defensible.
+3. **GPT-5.2's hash-chaining suggestion is worth the 1-2 hours.** I initially agreed with cutting hash-chain tamper-proof logs, but GPT-5.2 is right that `hash_i = sha256(hash_{i-1} + event_json)` is trivially implementable and directly addresses a stated requirement. This is a 30-line addition. It should go back in.
 
-- **GPT-5.2's liveness/anti-spoofing point is valid but scope-dependent.** For a hackathon where the jury controls the planted scenarios, photo attacks are unlikely. But adding a blink-detection check during enrollment (using Face Mesh eye landmarks) is ~2 hours of work and demonstrates awareness. Worth including if time permits on Day 8.
+**What GPT-5.2 added that I missed:**
 
-**Where I disagree with other reviewers:**
+- **Timestamp standardization** is more important than I initially recognized. The `t_capture_monotonic` + server offset approach is correct. Without this, the confusion matrix — your primary evaluation artifact — will have misaligned entries. This needs to be a Day 2-3 priority, not an afterthought.
 
-- **Gemini suggests NATS or Mosquitto for the edge server.** This adds operational complexity (another service to install, configure, and debug) for a problem that's solvable with a Python in-memory queue + batch SQLite writes. For 30 terminals at ~1 event/second average, we're talking about 30 writes/second peak — SQLite in WAL mode on an SSD (not SD card) handles this comfortably. The real fix, as I originally suggested, is to use an SSD-backed mini-PC instead of an SD-card Raspberry Pi for the edge server. If the budget constrains to a Pi, use a USB 3.0 SSD.
+- **SQLite write serialization via an async batching queue** is the right pattern. My concern about `SQLITE_BUSY` was correct but my suggestion (retry with backoff) was the naive solution. A single-writer queue that batches every 250-500ms is cleaner and eliminates the problem structurally.
 
-- **GPT-5.2's suggestion to add sequence numbers + idempotency keys is correct in principle but over-engineered for this context.** With 30 terminals over a 10-minute exam and store-and-forward, you're looking at maybe 500-1000 total events. Simple deduplication by `(terminal_id, timestamp, event_type)` is sufficient. Don't build Kafka semantics for a hackathon.
+**What Gemini added that I missed:**
+
+- **The "Malpractice Trigger" app for actors** is brilliant and neither GPT-5.2 nor I thought of it. Having the person staging the malpractice press a button at the exact moment they begin acting creates microsecond-accurate ground truth. This eliminates the clock synchronization problem between the human observer and the system entirely. It also looks incredibly professional during the demo. This should be a simple mobile web page served from the edge server with 6 big buttons (one per malpractice type) that logs `{terminal_id, malpractice_type, timestamp}`.
+
+**My updated assessment of the 8/10 target:**
+
+With the audio crosstalk issue properly understood, and posture as a FP risk, the reliable detection set is:
+- CANDIDATE_ABSENT: near-certain (Very High)
+- MULTIPLE_PERSONS: near-certain (Very High)
+- FACE_MISMATCH: high if cross-terminal matching is implemented (High)
+- GAZE_DEVIATION: medium-high with proper baseline calibration (Medium-High)
+- SUSPICIOUS_AUDIO: medium at best in a shared room (Medium)
+- SUSPICIOUS_POSTURE (fusion-only): low standalone, medium in fusion (Medium)
+
+For 8/10 staged events, assuming the jury stages a mix: 2 absences, 2 extra persons, 1-2 seat swaps, 2-3 gaze/talking/phone events — you'd reliably catch 5-6 from the first three categories and need 2-3 more from the noisier categories. It's tight. **The cross-terminal seat-swap detection I suggested earlier is now even more critical — it could be the difference between 7/10 and 8/10.**
 
 CONCERNS:
 
-1. **Memory pressure on Celeron/4GB is now elevated to the top concern** based on convergence across all three reviewers. The proposal must drop Electron and consolidate into a single Python process.
+1. **Audio crosstalk in a 30-terminal single-room setup** is now my top concern, elevated from my original list. Without amplitude-based common-mode rejection working correctly, audio becomes a net-negative feature that generates more false positives than true detections. The edge server MUST compare VAD trigger timestamps across terminals and suppress common-mode activations.
 
-2. **Timestamp synchronization for confusion matrix scoring** — newly elevated based on GPT-5.2's feedback. Without explicit time sync, the key scoring metric becomes unreliable.
+2. **Cross-terminal face matching for seat swaps is unaddressed in the architecture.** All three reviewers agree seat swaps are a marquee demo scenario. The edge server needs all enrollment embeddings and must cross-check on FACE_MISMATCH events. This is ~30 minutes of implementation but architecturally significant — it means enrollment embeddings must be pushed to the edge server, not just stored locally.
 
-3. **PyInstaller + MediaPipe + Windows Defender triple threat** — packaging risk, dependency conflicts, and AV false positives. All three independently identified aspects of this. Needs a Day-0 spike with a mitigation plan (code-signing certificate, AV exclusion, or fallback to running from source with a portable Python distribution).
+3. **Deployment remains the existential risk.** All three reviewers agree. The Day 0 GO/NO-GO gate is correct but must be expanded: test on a *non-dev Windows machine* with a fresh user account, ideally one with restricted permissions similar to government desktops.
 
-4. **Audio cross-talk across terminals in a shared room** — Gemini's framing of this is sharper than mine. Without edge-level common-mode rejection, audio alerts will be correlated noise, not independent signals. This makes the fusion logic unreliable since it treats each terminal's audio as independent evidence.
+4. **Multi-terminal integration testing at Day 8 is too late.** All three reviewers converge on this. Move to Day 4-5 with at least 3 terminals.
 
-5. **Gaze deviation as a standalone alert generator will produce the most visible false positives during the demo.** All three reviewers converge on this being high-FP. Demote to fusion-only signal.
+5. **CCTV stub is mandatory.** Consensus across all reviewers. Budget 2-4 hours on Day 6-7.
 
-6. **Raspberry Pi with SD card I/O** — Gemini is right that this is fragile. Either use USB SSD or use a mini-PC. The ₹30K budget can accommodate a ₹8K mini-PC over a ₹5K Pi if it eliminates the #1 infrastructure failure mode.
+6. **Hash-chaining for tamper-evident logs should be re-added.** 30 lines of code, directly addresses a stated requirement. No reason to cut it.
 
-7. **The 10-day schedule still has no buffer.** None of the other reviewers challenged my concern here, and the additional work items identified (time sync, common-mode rejection, AV mitigation, packaging spike) make it even tighter.
+7. **Gaze baseline calibration needs an explicit 10-second capture protocol** during enrollment, using median + MAD as GPT-5.2 suggested, not a single snapshot.
 
-8. **AGPL licensing of Ultralytics YOLOv8** — GPT-5.2 correctly flags this. For the hackathon it's fine, but if the proposal claims production-readiness for government deployment, this needs to be addressed. Consider YOLOv8 under the alternative license, or use a permissively-licensed alternative (NanoDet, YOLO-fastest).
+8. **The SUSPICIOUS_POSTURE alert must be gated** — either fusion-only (GPT-5.2's suggestion) or gated by UI inactivity (my original suggestion). Standalone head-pitch alerts will destroy precision.
 
 SUGGESTIONS:
 
-1. **Consolidate into a single Python process with PyQt6 for both the exam UI and proctoring agent.** Drop Electron entirely. This saves 300-500MB RAM, eliminates an IPC boundary, and removes a dependency. The exam MCQ interface can be a simple PyQt6 widget — it's 10 questions, not a complex web app.
+1. **Implement Gemini's "Malpractice Trigger" app.** A mobile-friendly web page served from the edge server with 6 buttons + terminal selector. Actors press the button when they begin staging a malpractice. This creates perfect ground truth and is a 2-3 hour build that dramatically improves the confusion matrix reliability. This replaces or supplements the admin ground-truth logger.
 
-2. **Implement edge-provided time synchronization** at session start. Terminal stores `offset = edge_time - local_time`, applies to all event timestamps. Three lines of code, prevents confusion matrix scoring failures.
+2. **Implement cross-terminal seat-swap detection on the edge server.** Push enrollment embeddings to edge during enrollment. On any FACE_MISMATCH event, compare the mismatched embedding against all enrolled embeddings. If it matches another terminal's enrollment, emit CONFIRMED_SEAT_SWAP with both terminal IDs. This is a demo showstopper feature.
 
-3. **Implement common-mode audio rejection at the edge server.** When processing incoming audio alerts, check if 3+ terminals reported within the same 500ms window. If so, suppress all of them and log as "ambient_noise_event." This is ~20 lines of code and dramatically reduces audio FP.
+3. **Add CCTV display stub.** RTSP ingest → background subtraction → motion heatmap overlay → display on dashboard. No AI detection, just visual monitoring with highlights. 2-4 hours, checks the compliance box.
 
-4. **Demote gaze to fusion-only signal.** Never generate a standalone gaze alert. Only use gaze deviation to boost confidence of other detectors (multi-face, phone detection, audio). This protects the demo from the single most likely source of visible false positives.
+4. **Re-add hash-chaining** for tamper-evident JSONL logs. `hash_i = sha256(hash_{i-1} || canonical_json(event_i))`. Store the running hash in each log line. 30 minutes of implementation.
 
-5. **Run a Day-0 packaging spike** (before the 10-day sprint starts): build a minimal PyInstaller binary that loads MediaPipe + ONNX Runtime, captures one webcam frame, and runs BlazeFace. Test on a Windows machine with Defender enabled. If this fails, pivot to portable Python (WinPython) distributed on USB.
+5. **Revise the audio strategy:** Keep 10s standalone threshold. Add amplitude-ranked common-mode rejection at the edge: if >3 terminals trigger VAD within 500ms, suppress all but the highest-amplitude source. This is the only way audio works in a shared room.
 
-6. **Use a mini-PC with SSD for the edge server instead of Raspberry Pi with SD card.** The ₹3K cost difference eliminates I/O bottleneck risk and provides enough CPU headroom for the aggregation service.
+6. **Make SUSPICIOUS_POSTURE fusion-only.** Never fire it standalone. Only emit when combined with GAZE_DEVIATION (→ POSSIBLE_MATERIAL_USE) or with UI inactivity >15s.
 
-7. **Adopt GPT-5.2's "detect → track → verify" pattern.** Run BlazeFace at 5fps, use centroid/bounding-box tracking between detections, run MobileFaceNet verification every 2 seconds. This cuts CPU usage by ~35% and eliminates transient "face absent" alerts from frame drops.
+7. **Revised schedule priorities:**
+   - Day 0: GO/NO-GO on non-dev machine (unchanged, but add restricted-user test)
+   - Day 1-3: Core pipeline + enrollment + verification + edge server basics
+   - Day 4: Vertical slice with **3 terminals** (moved from Day 8)
+   - Day 5: Dashboard + exam UI + ground-truth logger + malpractice trigger app
+   - Day 6: Evidence push + CCTV stub + hash-chaining + fusion rules + seat-swap detection
+   - Day 7: Confusion matrix + audio tuning + threshold calibration
+   - Day 8: 10+ terminal stress test + threshold tuning on real hardware
+   - Day 9: Full calibration exam + record fallback video
+   - Day 10: Rehearsal only
 
-8. **Define explicit degradation modes** (strong agreement with GPT-5.2): mic fails → audio alerts disabled; face mesh fails → gaze disabled; FPS drops below 5 → only face presence + multi-face. Each degradation should be visible on the dashboard as a terminal status indicator, not a silent failure.
+8. **Prepare the scalability one-pager:** Architecture diagram showing edge-server-per-hall model scaling to 10,000 centers. Cost breakdown: ~₹25,000 per hall (mini-PC + SSD + CCTV). Metadata aggregation to district/state dashboard over 4G. This directly addresses jury evaluation criteria.
 
-9. **Build vertical, not horizontal.** Days 1-3 should produce a working end-to-end flow: webcam → face detect → face verify → event to edge → dashboard display. Days 4-7 add detection types incrementally. Days 8-9 are threshold tuning on actual hardware. Day 10 is demo rehearsal only.
+9. **Capture at 640x480.** Explicitly set resolution in OpenCV. Non-negotiable on 4GB Celeron machines.
+
+10. **Pre-bake the fallback video on Day 9.** All three reviewers implicitly or explicitly support having a backup. Record a flawless 3-minute walkthrough of the entire flow.
 
 KEY_TRADEOFFS:
 
-1. **Single-process Python agent (PyQt6) vs. Electron + Python:** All three reviewers converge that Electron is too heavy. The tradeoff is losing a polished web-based exam UI in exchange for ~400MB RAM savings and one fewer deployment dependency. For 10 MCQ questions, this is overwhelmingly the right trade. The jury is evaluating proctoring accuracy, not exam UI aesthetics.
+1. **Audio conservative threshold (10s) + common-mode rejection vs. aggressive threshold (5s):** After Gemini's crosstalk analysis, the conservative approach is clearly correct for the demo environment. The tradeoff is missing brief whispered exchanges vs. avoiding mass false positives across 30 terminals in one room. **Updated: conservative is the right call. I was wrong earlier.**
 
-2. **Gaze as fusion-only vs. standalone detector:** This reduces recall (you'll miss cases where a student looks at a neighbor but no other signal fires) but dramatically improves precision. Given the hackathon scoring context where FPs are highly visible and directly penalized via the confusion matrix, this is the correct tradeoff. All three reviewers agree.
+2. **SUSPICIOUS_POSTURE as fusion-only vs. standalone:** Trades detection coverage (miss standalone phone-in-lap) for precision (eliminate the highest-FP alert type). Given the jury's explicit emphasis on minimal false positives, **fusion-only is the right call.** GPT-5.2 had the best formulation here.
 
-3. **Mini-PC vs. Raspberry Pi for edge:** Costs ~₹3K more but eliminates SD card I/O risk and provides headroom for future CCTV processing. Within the ₹30K budget, this is a no-brainer.
+3. **Hash-chaining re-added vs. keeping it cut:** Trades ~30 minutes of dev time for compliance with a stated requirement. This is trivially worth it. **All reviewers should converge on re-adding this.**
 
-4. **Time spent on packaging/deployment validation vs. feature development:** A Day-0 spike "wastes" a day that could build features. But if packaging fails on Day 9, you lose the entire demo. This is insurance with asymmetric payoff — all three reviewers agree the packaging risk is underweighted.
+4. **Cross-terminal seat-swap detection vs. terminal-local-only matching:** Trades slight architectural complexity (enrollment embeddings on edge server, cross-matching logic) for the ability to catch the marquee demo scenario. **This is the single highest-ROI feature addition in the entire debate.** 30 minutes of implementation, potential demo-winning moment.
 
-5. **Precision-over-recall strategy:** This is now the clear consensus position across all three reviewers. The proposal's revised thresholds already lean this way, but the further refinements (gaze demotion, common-mode audio rejection, 3-zone face verification) push further toward precision. The risk is missing 2-3 out of 10 planted events. The reward is that every alert the jury sees is credible. For a hackathon, credibility beats coverage.
+5. **CCTV display stub vs. no CCTV:** Trades 2-4 hours of development for compliance with an explicitly stated requirement. **Every reviewer agrees this is worth it.** The only question is timing — I suggest Day 6.
+
+6. **Multi-terminal testing at Day 4-5 vs. Day 8:** Trades slightly less feature completeness at the time of integration testing for dramatically earlier discovery of deployment/networking issues. **All three reviewers converge: earlier is mandatory.** This is perhaps the single most important schedule change.
+
+7. **WinPython portable vs. PyInstaller:** I disagree with Gemini here. WinPython is more debuggable on unknown machines; PyInstaller has worse antivirus false-positive rates. **Carry both as options, test both on Day 0, deploy whichever works on the target hardware.**
 
 ### GPT-5.2
 
 POSITION: PARTIALLY_AGREE
 
 REASONING:
-My position doesn’t materially change: the **edge-first, on-terminal inference** architecture is still the only credible way to hit the 4G + 30 terminals constraint. What *does* change after reading the other feedback is the weighting of risks: I now think the biggest threat to success is less “model accuracy” and more **packaging/deployment + runtime resource contention** (especially if Electron is in the loop and the edge server is a Raspberry Pi on SD card).
+My position does not change on the *core* architecture: terminal-side inference + edge-side aggregation/dashboard + episode semantics + degradation + store-and-forward is the right backbone to survive a live demo and score well on “low false positives” + confusion matrix.
 
-There’s strong convergence across all reviewers on a few points:
-- The scope reduction is necessary but still not “safe”; you need an even more reliable vertical slice and more buffer for integration/tuning.
-- The **evidence retrieval** path is architecturally inconsistent with “nothing leaves the terminal” and creates real security/ops complexity (inbound connections to exam machines).
-- SQLite-on-Pi/SD as a high-frequency write sink is fragile unless you redesign the write path.
+What *did* change after reading others: I now think **the terminal UI/deployment choice (PyQt6 + portable Python)** is a larger existential risk than I previously weighted. Claude and Gemini are directionally right: on unknown Windows desktops, the probability that *something* in Qt/VC++/AV/permissions breaks on a subset of machines is high, and any per-terminal failure reduces your 30-seat credibility quickly.
 
-Where I disagree slightly with others is on introducing additional infrastructure (NATS/Mosquitto/Redis) for a hackathon. Those can be the “right” production move, but they add setup and failure modes. You can get most of the reliability benefits with **simple queues + batched writes + append-only logs** without adding new daemons.
+I also agree with Claude’s point that **seat swap is the marquee scenario** and the current writeup does not clearly guarantee detection if both candidates are validly enrolled (swap between terminals). Without **cross-terminal matching**, you can miss the exact scenario the jury is likely to stage.
+
+Where I disagree with other participants:
+- I *don’t* agree that “PyQt is the correct tradeoff if you keep UI simple” (Gemini). For this hackathon, **launch reliability > RAM efficiency**. A 150–250MB Chrome/Edge tab is a better failure mode than a Qt runtime that may not start at all.
+- I’m not convinced **PyInstaller** is universally safer than WinPython. PyInstaller often introduces its own DLL/path/AV heuristics issues. The safer path is to **support two packaging options** and choose after Day-0 hardware reality check, not to bet everything on one.
+
+Common ground across all feedback:
+- Biggest demo risk is **operational** (deployment, multi-terminal scale, time sync), not model accuracy.
+- **CCTV cannot be totally absent**; a minimal “integration stub” is worth it.
+- **Audio and posture/gaze are FP traps** unless constrained/fused.
+- Integration testing must move earlier.
 
 CONCERNS:
-1. **Electron + Python on 4GB/Celeron is likely a demo-killer** (RAM pressure → swapping → dropped frames/UI freezes). I agree with Gemini/Claude that this risk is underweighted.
-2. **Edge server as Raspberry Pi 4 + SQLite on SD card is a bottleneck / SPOF.** SQLite single-writer + SD latency will cause lock contention during bursts; this matches Claude+Gemini concerns and aligns with my earlier “operational reliability” theme.
-3. **Evidence model contradiction remains unresolved** (“never transmitted” vs “dashboard can request”). Claude highlighted the practical routing/security implications; I fully agree.
-4. **Hash-chain logging is close to security theater** if terminals aren’t trusted. Claude’s point is correct: without an external trust anchor, it doesn’t provide adversarial tamper-proofing.
-5. **Kiosk/lockdown is not optional** if you’re running the exam UI on the same machine. Claude’s callout is important: without OS-level lockdown, students can kill/evade the agent, and “local evidence” can be deleted.
-6. **Time synchronization is required for fair confusion-matrix scoring.** None of the other feedback contradicted this; it remains a critical hidden failure mode.
-7. **Audio VAD will trigger correlated false positives across nearby terminals** (Gemini’s “cross-talk/common noise” concern). Even with Silero + conservative thresholds, without cross-terminal correlation you’ll get noisy events.
-8. **PyInstaller + MediaPipe/ONNX packaging risk is real.** Claude and Gemini both flagged this; I agree and would treat it as a top-3 schedule risk.
-9. **Multi-modal fusion is underspecified** (temporal windows, conflict handling, dedupe/out-of-order). Claude is right: this is where systems get messy and it’s currently “hand-wavy.”
-10. **CCTV on the edge box is incompatible with “edge must stay responsive.”** Even if CCTV is “cut,” the doc still includes it heavily, which invites accidental scope creep and resource starvation (Gemini’s point).
+1. **Terminal launch reliability (highest risk):** PyQt6 + portable Python on locked-down Windows + unknown drivers/AV policies can fail to start on multiple terminals.
+2. **Seat-swap detection gap:** Without edge-side cross-enrollment matching, swapping two enrolled candidates between terminals can evade “FACE_MISMATCH” (or be misclassified).
+3. **Audio crosstalk false positives in a 30-mic room:** One student speaking can trigger many mics; “common-mode reject” is hard under clock skew and differing mic gains.
+4. **CCTV requirement optics:** Completely omitting CCTV can cost points even if you explain “risk.” Judges may score against the written spec.
+5. **Ground-truth/timestamp validity:** If your time alignment is off by seconds, confusion matrix credibility collapses.
+6. **Posture and gaze false positives:** Head pitch and head yaw are very sensitive to camera mounting height, screen position, and natural exam behavior (looking down to read/think).
+7. **Edge persistence under burst:** SQLite can still hit `SQLITE_BUSY` unless you serialize writes and batch.
+8. **Late multi-terminal testing (schedule risk):** Finding LAN/firewall/backpressure issues on Day 8 is too late.
 
 SUGGESTIONS:
-1. **Hard-pivot to LAN-first demo architecture:** edge server hosts the dashboard locally; cloud mirroring is optional. This is the cleanest convergence point across feedback.
-2. **Remove Electron from the agent for the hackathon.** Keep a single Python executable for proctoring + a minimal UI (PyQt or even OpenCV window), and run the “exam” as a separate, simple local web page served by the edge or terminal browser. Decouple “exam UI responsiveness” from “AI inference load.”
-3. **Change edge logging to append-only files + batch ingestion.** Converging with Claude/Gemini: write events to per-terminal JSONL files (no locks), and optionally ingest into SQLite/Postgres asynchronously for queries. This avoids SD/SQLite contention without introducing Redis/NATS.
-4. **Make evidence retrieval one-way and edge-mediated.** For hackathon simplicity: terminal pushes snapshots *to edge* on high/critical alerts (LAN bandwidth is fine), then dashboard reads from edge. This eliminates inbound requests to terminals and resolves the privacy/ops contradiction (still “no continuous video,” just alert-triggered stills).
-5. **Define fusion precisely and minimally.** Pick a single correlation window (e.g., 10s), define event IDs/sequence numbers, and implement only 2–3 fusion rules that are easy to explain and test. Don’t build a “general fusion engine.”
-6. **Add cross-terminal “common-mode rejection” for audio** (Gemini suggestion): if N terminals trigger audio within a tight window, downgrade/ignore as ambient noise. This is a high-leverage, low-complexity improvement.
-7. **Add explicit time offset handshake** at session start and store both local and edge-derived timestamps.
-8. **Re-plan as a vertical slice with a hard fallback.** Claude’s recommendation is right: get (face detect → verify → one alert → dashboard) working end-to-end early, and keep it demoable even if gaze/audio/object detection slips.
+1. **Decouple terminal UI from the AI agent (primary change):**
+   - Run a **headless “agent.exe”** (or `agent.bat`) that does capture/inference/spooling.
+   - Serve the exam UI as **plain HTML/JS** (either from the edge server or a tiny local server), opened in the existing browser (Edge/Chrome).
+   - Keep PyQt only as an optional fallback if you insist—but don’t make it the single path to starting the exam.
+2. **Implement explicit seat-swap detection (high ROI differentiator):**
+   - During enrollment, store an embedding per candidate on the edge (or per-terminal with periodic sync).
+   - On mismatch/uncertain, edge compares the embedding against *all enrolled* and emits **CONFIRMED_SEAT_SWAP(terminal_A, terminal_B)** when it best-matches another candidate strongly.
+   - This is a “wow” moment in the demo and directly targets a likely staged event.
+3. **Add CCTV “checkbox compliance” with minimal risk:**
+   - Edge dashboard shows CCTV feed (RTSP/USB) + optional motion heatmap/background subtraction overlay.
+   - One alert type like **AISLE_ACTIVITY** is enough; don’t attempt person re-ID/body pose.
+4. **Constrain audio to avoid destroying precision:**
+   - Make audio **fusion-only** by default (e.g., AUDIO contributes only if paired with gaze/face absence) *or* require (a) sustained VAD + (b) above-baseline RMS energy.
+   - If you keep standalone audio: keep threshold conservative for demo and add per-terminal gain normalization.
+5. **Move multi-terminal integration earlier:**
+   - By **Day 5**, run 3–5 terminals end-to-end (events + dashboard + DB + reconnect). Don’t wait for “pretty UI.”
+6. **Time sync: make it boring and auditable:**
+   - Always log **capture timestamp** at terminal; compute server offset periodically; store both raw and corrected times.
+   - In the dashboard, show “clock offset” per terminal so judges see you’re controlling the variable.
+7. **Packaging strategy: don’t bet on one tool**
+   - Prepare **two deployables** by Day 2: (a) WinPython portable folder, (b) PyInstaller `--onedir`.
+   - Day 0/1 hardware test decides which is used on demo day.
 
 KEY_TRADEOFFS:
-- **Fewer moving parts vs “enterprise” messaging stack:** Others suggest NATS/MQTT/Redis. The trade is reliability-through-infrastructure vs hackathon simplicity. I’d keep it simple (files + queues) for the hackathon, but acknowledge a broker is a production evolution.
-- **Privacy posture vs operational simplicity:** “Nothing leaves the terminal” maximizes privacy optics but complicates evidence review and creates terminal tampering risk. Pushing *only alert snapshots* to the edge is the pragmatic middle ground.
-- **Edge hardware cost vs robustness:** Pi 4 fits budget, but it’s a reliability/perf risk with SD I/O. A mini-PC (used/refurb) is operationally safer. The right trade depends on whether demo scoring values “realistic low-cost BOM” more than “it never crashes.”
-- **Audio/gaze breadth vs credibility:** More detectors increases “wow,” but also increases FP and integration risk. Converged feedback suggests prioritizing a smaller set of high-confidence signals and using the rest only as supporting evidence.
+- **Qt native app vs browser UI:** Qt can be RAM-efficient, but the hackathon-winning metric is “starts everywhere.” Browser UI trades some RAM for dramatically higher deployment reliability and faster UI iteration.
+- **Audio sensitivity vs false positives:** Lower thresholds catch more cheating but risk flagging the whole room. Given the explicit “minimize false alarms,” it’s better to be conservative and use fusion than to chase recall with noisy audio.
+- **CCTV AI vs CCTV integration stub:** Full CCTV analytics is high risk; a feed + motion overlay is low risk and satisfies spec optics. This is the right compromise for demo day.
+- **More alert types vs cleaner confusion matrix:** Extra modalities (posture/gaze) can improve recall but can also tank precision. For winning, precision and credible metrics likely beat breadth.
 
 ### Gemini 3 Pro
 
 POSITION: PARTIALLY_AGREE
 
 REASONING:
-There is a strong consensus among all reviewers that **edge-based inference** is the correct architectural choice for the bandwidth constraints, but the **implementation plan is dangerously overloaded** for the hardware (Celeron/4GB) and the timeline (10 days).
+The panel has reached a strong consensus: this architecture is **conceptually winning** (Local AI, Episode-based events, Fusion Rules) but **operationally fragile**.
 
-I agree with Claude and GPT-5.2 that the **10-day schedule is the single biggest non-technical risk**. Attempting to build a native Python agent, a React dashboard, an Edge backend, and fine-tune 6 AI models simultaneously will likely result in a system that is "feature-complete" but operationally broken (laggy, crashing, or falsely alerting).
+I agree with **Claude Opus** that the **PyQt6 Exam UI** is a strategic error. Building a polished MCQ interface in Qt Widgets is a massive time sink for 1-2 developers compared to HTML/CSS. A "Headless Python Agent + Browser UI" approach solves the velocity problem while keeping the AI logic in Python.
 
-I specifically endorse Claude’s critique regarding the **contradiction in the evidence architecture**: claiming "no video leaves the terminal" while allowing the dashboard to "request snapshots" implies an inbound connection to the terminal. This creates a massive networking headache (NAT traversal/reverse proxy on LAN) and a security vulnerability that cannot be solved robustly in a hackathon setting.
+I agree with **GPT-5.2** that cutting **CCTV** entirely is a non-starter. The challenge explicitly requires it. A "dumb" implementation (display-only) is infinitely better than zero implementation.
+
+I stand by my original concern regarding **Audio Crosstalk** and **Deployment Hell**. The proposed 10-second audio threshold is a "safe" choice that renders the feature useless for detecting real whispers (which last 2-3s).
 
 CONCERNS:
-1.  **Client Resource Saturation (Consensus):** Running Electron (300MB+) alongside a Python inference engine (300MB+) and Windows OS services on a 4GB machine will cause paging to disk. This kills real-time performance.
-2.  **Packaging & Deployment Fragility:** As noted by Claude, packaging MediaPipe/ONNX with PyInstaller is notoriously brittle (DLL hell, path issues). Doing this on "Day 1" is optimistic; if it fails, the deployment strategy collapses.
-3.  **Time Synchronization (Critical Demo Killer):** As GPT-5.2 noted, without millisecond-level time sync between terminals and the Edge server, the "Confusion Matrix" comparison against the jury's ground truth logs will fail due to clock drift, rendering the accuracy metrics useless.
-4.  **Edge Server I/O Bottleneck:** SQLite on a Raspberry Pi SD card cannot handle concurrent writes from 30 terminals during an alert spike (e.g., a loud noise triggering 30 audio events).
-5.  **Audio Cross-Talk:** Physics dictates that a cough or dropped pen will trigger VAD on multiple nearby terminals. The current logic treats these as individual malpractice events, which guarantees a high False Positive rate.
-6.  **Security Theater:** The "Hash Chain" log provides no real security since the key is on the compromised terminal, and the "Kiosk Mode" is currently undefined.
+1.  **PyQt6 "Velocity Trap":** (Aligned with Claude) You will spend 50% of your time fighting Qt layouts for the Exam UI instead of tuning the AI. The UI needs to look professional; Qt makes that hard.
+2.  **The "Seat Swap" Logic Gap:** (Aligned with Claude) If Terminal A detects a mismatch, the current architecture flags "Imporsonation." To *win*, it must identify that the intruder is actually the candidate from Terminal B. The current design misses this cross-terminal lookup.
+3.  **CCTV Compliance:** (Aligned with GPT-5.2) Completely ignoring Component 1 (CCTV) gives judges an easy reason to disqualify you, even if the rest is perfect.
+4.  **Day 8 Integration Suicide:** (Aligned with Claude) Testing multi-terminal networking on Day 8 is too late. LAN congestion and SQLite locking will appear immediately at scale.
+5.  **Audio Thresholding:** 10s is too long (misses cheating). 3s is too short (false positives). Without energy gating or cross-terminal volume comparison, audio remains a liability.
 
 SUGGESTIONS:
-1.  **Aggressive UI Simplification:**
-    *   **Agent:** Drop Electron entirely. Use a minimal system tray app (PyQt/Tkinter) that launches the default system browser for the exam.
-    *   **Dashboard:** Drop React. Use **Streamlit** or **FastAPI + HTMX** (server-side rendering). This cuts frontend dev time by 60% and reduces client-side load on the Edge server.
-2.  **Solve the I/O Bottleneck:** Switch logging on the Edge Server to **Append-Only JSON Lines** (one file per terminal). This removes SQLite locking contention entirely. Ingest into SQLite only for the dashboard view.
-3.  **Implement Time Sync:** The Edge server must include a timestamp in its heartbeat response. Terminals record `delta = edge_time - local_time` and apply this offset to all event timestamps before sending.
-4.  **Network Architecture Fix:** Remove the "Dashboard requests snapshot" feature. Instead, terminals should **push** encrypted snapshots to the Edge server via HTTP POST immediately upon generation (or queue them). This removes the need for inbound connections to terminals.
-5.  **Audio "Common Mode Rejection":** If >3 terminals trigger audio alerts within 500ms, the Edge server should suppress them as "ambient noise."
+1.  **Architecture Pivot: Headless AI + Browser UI:**
+    *   **Exam UI:** A simple HTML/JS app served locally (FastAPI/Flask) or opened as a file in the system browser (Chrome/Edge). This guarantees a clean UI and saves days of dev time.
+    *   **AI Agent:** Runs as a background Python process (system tray icon). It handles the webcam, models, and WebSocket comms to the Edge Server.
+    *   **Overlay:** If you need to lock the screen, use a simple full-screen browser kiosk mode.
+
+2.  **Implement the "CCTV Stub":**
+    *   On the Edge Server, ingest the RTSP stream.
+    *   Display it on the Dashboard.
+    *   **Do not** run AI on it. Just show it. This checks the "Integration" box.
+
+3.  **Smart "Seat Swap" Detection:**
+    *   Update the Edge Server: When `FACE_MISMATCH` events arrive, compare the "intruder" embedding against the *global* enrollment list.
+    *   Return: "ALERT: Candidate B is at Terminal A." This is a "Wow" moment for the demo.
+
+4.  **"Loudest-Mic" Audio Gate:**
+    *   Modify the Edge Server to buffer audio events for 500ms.
+    *   If multiple terminals report `SUSPICIOUS_AUDIO` simultaneously, only flag the one with the highest amplitude/confidence.
+
+5.  **Day 0 "Pre-Flight" Diagnostic Tool:**
+    *   Build a standalone `.exe` that checks: Camera availability, Mic levels, VC++ Runtimes, and Write permissions.
+    *   Run this on every machine immediately upon entering the hall to identify "dead" terminals before deployment.
 
 KEY_TRADEOFFS:
-**Features vs. Stability:** The revised plan is still too feature-rich. The "Must Ship" list should be cut further (drop Audio VAD and Object Detection entirely) to focus purely on Face Verification + Gaze + Absence. A rock-solid demo of 3 features beats a flaky demo of 6.
-
-**Evidence Access vs. Complexity:** By pushing snapshots to the Edge server (encrypted), you sacrifice the "strict local storage" privacy claim but gain a functioning architecture that doesn't require complex LAN networking. This is the pragmatic choice for a hackathon.
+**Browser UI vs. PyQt6:** You are trading **RAM efficiency** (Browser uses more) for **Development Velocity** (HTML is faster). given the timeline (7 days), Velocity is the correct tradeoff. The 4GB RAM can handle a single Chrome tab + ONNX.
+**CCTV Stub vs. Full AI:** You are trading **Technical Depth** for **Checklist Compliance**. In a government hackathon, checking the box is more important than a feature that crashes the demo.
+**Cross-Terminal Logic vs. Edge Simplicity:** You are adding complexity to the Edge Server (global matching) to gain a massive **Competitive Differentiator** (detecting specific seat swaps). This is worth the cost.
 
 ---
 ## Round 3
 
 ### Claude Opus
 
+
+
 POSITION: PARTIALLY_AGREE
 
 REASONING:
 
-After this second round of review, my position strengthens on the core thesis: the architecture is fundamentally sound, but the implementation plan carries concentrated risks in deployment, resource management, and schedule that could sink the demo. The three-reviewer convergence gives me high confidence on the critical issues.
+After three rounds of debate, the panel has achieved remarkable convergence. I'll focus this final response on crystallizing where we've landed, the one remaining genuine disagreement, and the prioritized action list.
 
-**Strong consensus points I now consider settled:**
+**Full consensus items (all three reviewers agree — these are now architectural requirements):**
 
-1. **Drop Electron. Single Python process.** All three reviewers independently arrived here. The memory math is unambiguous on 4GB Celeron machines. This is no longer a suggestion — it's a prerequisite for a working demo. The only remaining question is PyQt6 vs. tkinter vs. Gemini's suggestion of launching a system browser for the exam UI. I lean toward PyQt6 because it keeps everything in-process (no browser dependency, no IPC), but I acknowledge Gemini's browser-based approach is simpler if the exam content is already HTML.
+1. **Cross-terminal seat-swap detection on the edge server.** This is the single highest-ROI addition identified across the entire debate. Every reviewer independently flagged it. Implementation: enrollment embeddings pushed to edge, cross-matching on FACE_MISMATCH, emit CONFIRMED_SEAT_SWAP with both terminal IDs. ~1-2 hours of work, potential demo-winning moment. **Non-negotiable.**
 
-2. **Time synchronization is required.** GPT-5.2 raised it, I endorsed it, Gemini elevated it to "critical demo killer." Three-way convergence. The fix is trivial (edge timestamp in heartbeat, terminal applies offset). It should be implemented on Day 1 alongside the WebSocket handshake — not as a separate task.
+2. **CCTV stub is mandatory.** RTSP ingest → display on dashboard + optional background subtraction motion overlay. No AI detection on CCTV feed. 2-4 hours. Checks compliance box for Component 1. **Non-negotiable.**
 
-3. **Evidence architecture must be push-based, not pull-based.** GPT-5.2's "edge-mediated, one-way push" formulation is the cleanest resolution. Terminal pushes alert-triggered snapshots to edge over LAN (bandwidth is trivially sufficient for JPEG stills). Dashboard reads from edge. No inbound connections to terminals. The proposal's privacy claim changes from "nothing leaves the terminal" to "only alert-triggered stills leave the terminal, transmitted over encrypted LAN to the edge server." This is honest and architecturally clean.
+3. **SUSPICIOUS_POSTURE must be fusion-only.** Never fires standalone. Only contributes through fusion rules (POSTURE + GAZE → POSSIBLE_MATERIAL_USE). This protects the confusion matrix, which Anil sir explicitly said is a primary evaluation artifact. **Non-negotiable.**
 
-4. **Edge server should not be a Raspberry Pi with SD card.** All three reviewers flagged I/O concerns. The disagreement is only about the mitigation: mini-PC with SSD (my preference), USB SSD on Pi (acceptable fallback), or append-only JSONL files to avoid SQLite contention (GPT-5.2 and Gemini's suggestion, which I now think is the right approach regardless of hardware).
+4. **Audio needs common-mode rejection at the edge.** The 30-mic-in-one-room physics problem is real. Buffer VAD events for 500ms at the edge; if >3 terminals trigger simultaneously, suppress all but the highest-amplitude source. Keep 10s standalone threshold. **Non-negotiable.**
 
-5. **Precision over recall for the demo.** Universal agreement. Every false positive the jury witnesses erodes credibility more than a missed detection.
+5. **Multi-terminal integration testing moves to Day 4-5.** Finding LAN/firewall/SQLite contention issues on Day 8 is a project-ending discovery. 3 terminals by Day 4, full vertical slice. **Non-negotiable.**
 
-**Where I've refined my position based on this round:**
+6. **Hash-chaining re-added.** 30 lines of code. `hash_i = sha256(hash_{i-1} || canonical_json(event_i))`. Directly addresses the "tamper-proof logs" requirement stated in the challenge. **Non-negotiable.**
 
-On **Gemini's suggestion to drop React and use Streamlit or HTMX**: I initially dismissed this, but Gemini's argument about cutting frontend dev time by 60% is compelling for a hackathon. The dashboard is the jury-facing artifact — it needs to look good and work reliably, but it doesn't need to be a production SPA. Streamlit can render a terminal grid, live alert feed, and confusion matrix. The tradeoff is less customization and potential latency on updates, but for 30 terminals updating every 5 seconds, Streamlit's polling model is adequate. **I now support this.** It frees 1.5-2 days from the schedule, which is the most valuable resource.
+7. **Pre-bake a fallback demo video on Day 9.** All reviewers support this as insurance. 3-minute flawless walkthrough of enrollment → exam → detection → dashboard → confusion matrix.
 
-On **GPT-5.2's append-only JSONL suggestion**: I previously defended SQLite in WAL mode, but I'm now persuaded that JSONL-per-terminal is strictly simpler for the write path. No locking, no contention, no driver dependencies. You can always ingest into SQLite asynchronously for dashboard queries. This is the right layering: fast writes to files, lazy reads from database.
+**The one remaining genuine disagreement: PyQt6 vs. Browser UI**
 
-On **Gemini's suggestion to drop Audio VAD and Object Detection entirely**: This is where I still disagree. Dropping to only 3 detectors (face verification + gaze + absence) makes the system too thin. The jury expects 8/10 malpractice detection, and with only 3 signal types, you can't cover the expected scenario variety (phone use, whispering, unauthorized materials). I think the right cut is: keep Audio VAD with Silero + common-mode rejection (it's low implementation cost after Day 4), keep Object Detection as a stretch goal for Day 7, and drop CCTV entirely. This gives you 4-5 reliable signal types, which is enough to hit 8/10 with fusion.
+This is the only point where the panel hasn't fully converged, and I want to be precise about the actual tradeoff because I think we're talking past each other slightly.
 
-**Genuine disagreements that remain:**
+GPT-5.2 and Gemini advocate for: headless Python agent (background process) + browser-based exam UI (HTML/JS served locally or from edge). The argument is deployment reliability and UI development velocity.
 
-1. **NATS/Mosquitto/Redis for edge messaging.** Gemini implied structured messaging might help; GPT-5.2 and I both argue against it. For 30 terminals at low event rates, adding a message broker is pure complexity overhead. JSONL + in-memory queues + batch ingestion is the right pattern. I'm firm on this.
+I previously said this depends on team familiarity. After further reflection, I want to update my position with more specificity:
 
-2. **Hash-chain logging value.** GPT-5.2 calls it "security theater," and I partially agree — it doesn't provide adversarial tamper-proofing without an external trust anchor. But I think it's still worth ~2 hours of implementation for the demo narrative. Government evaluators care about "evidence integrity" as a concept. A hash chain that can be verified offline is a credible story, even if it's not HSM-grade security. The key is not to oversell it.
+**The browser-based approach has a hidden integration cost that the other reviewers are underweighting.** Specifically:
 
-3. **Kiosk/lockdown mode.** GPT-5.2 correctly notes that without OS-level lockdown, students can kill the agent. But implementing Windows kiosk mode (Assigned Access or AppLocker) on 30 terminals is a deployment nightmare that I wouldn't attempt during a hackathon. The pragmatic answer: the agent runs as a service, includes a watchdog, and logs if its process is killed. This is detectable, not preventable, and that's acceptable for a POC.
+- The headless agent needs to communicate with the browser UI for: enrollment flow (capture frames, show quality feedback, confirm enrollment), exam state sync (timer, question navigation, submission), and webcam status indicators (green/red light showing monitoring is active). This requires either a local WebSocket server or a shared state mechanism. That's not trivial — it's a second communication protocol alongside the terminal→edge protocol.
+
+- Browser webcam access via `getUserMedia` requires HTTPS or localhost, and the permission dialog will appear on every machine. In a government exam setting with 30 students, a single confused student clicking "Block" on the camera permission breaks that terminal's monitoring silently. PyQt6's `cv2.VideoCapture` has no permission dialog on Windows.
+
+- The "kiosk mode" lockdown that Gemini mentions (full-screen browser) is fragile. Alt+F4, Alt+Tab, Ctrl+W all escape it. PyQt6 can intercept keyboard events at the OS level more reliably.
+
+**However**, GPT-5.2's core point is valid: if PyQt6 fails to launch on multiple terminals due to missing VC++ runtimes or DLL conflicts, you lose the entire demo. This is a real risk.
+
+**My final position on this:** The architecture should support **both paths** with a decision made on Day 0-1 based on the hardware reality check. The AI pipeline is Python regardless. The exam UI is a thin layer on top. Design the agent to expose a local HTTP API (`/api/enrollment/status`, `/api/exam/state`, `/api/webcam/frame`) from Day 1. If PyQt6 works on the target hardware, use it for tighter control. If it doesn't, pivot to browser UI consuming that same API. **The local HTTP API is the insurance policy, not a commitment to either UI framework.** This adds perhaps 2 hours of work but eliminates the existential deployment risk.
+
+**On Gemini's concern about audio thresholds being too conservative:**
+
+Gemini argues 10s is too long and misses real cheating (whispers last 2-3s). I understand the argument but strongly disagree for this specific demo context. In a single room with 30 terminals, a 3-second threshold will flag 10+ terminals every time any student coughs, mutters while reading, or the jury members discuss among themselves. The confusion matrix will be destroyed. For the demo, audio is a **bonus** channel that adds to fusion but should almost never fire standalone. If we catch one genuine AUDIO + GAZE fusion event during the demo, that's a win. If audio generates 15 false positives, that's a loss. **Conservative is correct here.**
+
+**On deployment packaging (WinPython vs PyInstaller):**
+
+All three reviewers now effectively agree: prepare both, decide on Day 0. I'll add one concrete suggestion — Gemini's "pre-flight diagnostic tool" idea is excellent and should be the very first thing built. Not as a standalone .exe (that introduces its own packaging problem), but as a simple Python script that can run from the WinPython portable distribution:
+
+```python
+# preflight.py — run on each terminal before deployment
+import sys, os, json
+checks = {}
+try:
+    import cv2; cap = cv2.VideoCapture(0); checks["camera"] = cap.read()[0]; cap.release()
+except: checks["camera"] = False
+try:
+    import sounddevice; checks["mic"] = len(sounddevice.query_devices()) > 0
+except: checks["mic"] = False
+try:
+    import onnxruntime; checks["onnx"] = True
+except: checks["onnx"] = False
+checks["ram_gb"] = round(os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / (1024.**3), 1) if hasattr(os, 'sysconf') else "check manually"
+checks["python"] = sys.version
+checks["write_test"] = os.access(".", os.W_OK)
+print(json.dumps(checks, indent=2))
+```
+
+Run this on every terminal within the first 15 minutes of setup. Identify dead machines immediately.
 
 CONCERNS:
 
-1. **Schedule remains the highest risk even after scope reduction.** With Gemini's Streamlit suggestion adopted, we recover ~1.5 days, but the additions (time sync, common-mode rejection, JSONL logging, push-based evidence) consume that buffer. Net schedule pressure is unchanged. The team needs to commit to the vertical-slice approach: end-to-end working demo by Day 5, feature additions Days 6-8, tuning Days 9-10.
+1. **The local HTTP API abstraction layer (UI-agnostic agent) must be designed from Day 1.** If the team builds deeply coupled PyQt6 code for 4 days and then discovers Qt won't launch on exam center machines, pivoting to browser UI without this abstraction layer means rewriting the entire UI integration. This is the one concern I want to elevate above all others because it's a process risk, not a technical risk.
 
-2. **PyInstaller/MediaPipe packaging on Windows remains the #1 technical unknown.** All three reviewers flagged this. The Day-0 spike is non-negotiable. If it fails, the fallback (WinPython portable distribution on USB) needs to be validated simultaneously.
+2. **Cross-terminal seat-swap detection introduces an enrollment data flow that isn't in the current architecture.** Terminals must push embeddings to the edge during enrollment. The edge must store and index them. On FACE_MISMATCH, the edge must do a 1:N comparison (N=30, trivial compute but the data flow must be designed). This needs to be in the Day 2 enrollment implementation, not bolted on later.
 
-3. **Audio cross-talk without common-mode rejection will poison the confusion matrix.** This is now a three-reviewer consensus concern. The 20-line edge-side implementation must be in the Day 4 audio work, not treated as an optimization.
+3. **The CCTV stub needs a camera.** Has anyone confirmed whether the demo venue will have an IP camera available, or does the team need to bring one? A USB webcam on the edge server is a viable fallback (~₹1,500) but the RTSP ingest code would change to `cv2.VideoCapture(1)`. Test both paths.
 
-4. **Gaze as standalone alert will generate visible false positives during demo.** Three-reviewer consensus. Demote to fusion-only.
+4. **SQLite write serialization remains important.** GPT-5.2's async batching queue is the right pattern. With 30 terminals pushing events + the ground truth logger + the CCTV stub potentially writing motion events, the edge server's SQLite needs a single-writer queue. Use `asyncio.Queue` → batch writer coroutine that flushes every 250ms or on 50 pending events, whichever comes first.
 
-5. **4GB Celeron machines may not sustain 12-15fps inference.** The CPU budget analysis assumes i5 performance. On Celeron, the proposal acknowledges dropping to 10fps but doesn't address the cascade: lower FPS means longer persistence windows needed for alerts, which means slower detection, which means potentially missing short-duration malpractice events during the 10-minute exam. The adaptive scheduling must account for this explicitly.
-
-6. **No fallback plan for complete webcam failure during demo.** All three reviewers note the webcam is the single point of failure. Beyond backup USB webcams, there should be a pre-recorded video mode where the agent processes a video file instead of live capture. This takes 30 minutes to implement (swap `cv2.VideoCapture(0)` with `cv2.VideoCapture("fallback.mp4")`) and could save the entire demo.
-
-7. **The proposal still references 40 terminals in places (T-01 to T-40) while the constraint says 30.** Minor, but indicates the document wasn't fully reconciled after edits. This kind of inconsistency in a jury-facing document undermines credibility.
+5. **The malpractice trigger app (Gemini's idea, which I endorsed) needs network access from a mobile device on the same LAN.** This means the edge server's WiFi/LAN must be accessible from phones. In a school network, this might require a portable WiFi router. Budget ₹500-1,000 and bring one.
 
 SUGGESTIONS:
 
-1. **Adopt Streamlit for the dashboard instead of React.** This is Gemini's suggestion and I now fully endorse it. For a hackathon, Streamlit delivers 80% of the visual impact at 20% of the development cost. Use `st.columns` for the terminal grid, `st.metric` for stats, and a simple WebSocket client for real-time updates. Reserve React for production.
+**Prioritized implementation list (final, incorporating all three reviewers' convergence):**
 
-2. **Implement append-only JSONL per terminal on the edge server, with async SQLite ingestion for queries.** This resolves the I/O contention concern without adding infrastructure. Write path: terminal → WebSocket → edge handler → append to `T-15.jsonl`. Read path: background thread ingests JSONL into SQLite every 2 seconds for dashboard queries.
+**Tier 0 — Existential (must work or demo fails):**
+1. Day 0 preflight diagnostic on non-dev machine (camera, mic, ONNX, write permissions)
+2. UI-agnostic agent with local HTTP API (insurance against PyQt6 failure)
+3. Core pipeline: BlazeFace → MOSSE → MobileFaceNet with CLAHE, running at stable FPS
+4. Enrollment with quality gates + embedding push to edge server
+5. Edge server with FastAPI + SQLite WAL + async write queue
+6. Dashboard with terminal grid + alert feed (vanilla JS + SSE)
+7. Multi-terminal vertical slice by Day 4 (3+ terminals)
 
-3. **Push evidence snapshots from terminal to edge on alert trigger.** Terminal captures JPEG, encrypts with session key, POSTs to edge over LAN. Edge stores in filesystem indexed by event ID. Dashboard reads from edge. No inbound connections to terminals. Update the privacy documentation to accurately describe this flow.
+**Tier 1 — Demo-winning (differentiators):**
+8. Cross-terminal seat-swap detection (CONFIRMED_SEAT_SWAP with both terminal IDs)
+9. Episode-based event semantics (not per-frame spam — this IS a differentiator vs competitors)
+10. Confusion matrix with 1:1 greedy matching, displayed on dashboard
+11. Malpractice trigger app for actors (mobile web page, 6 buttons)
+12. FPS-based graceful degradation with status indicator on dashboard
 
-4. **Implement video-file fallback mode in the capture thread.** Add a `--source` CLI flag that accepts either a device index or a file path. This serves double duty: enables offline testing during development AND provides a demo fallback if webcams fail. Thirty minutes of work, potentially saves the demo.
+**Tier 2 — Compliance (required but not differentiating):**
+13. CCTV display stub on dashboard (RTSP or USB fallback)
+14. Hash-chaining for tamper-evident JSONL logs
+15. Store-and-forward with replay on reconnect
+16. Evidence snapshot push (encrypted JPEG on high/critical alerts)
 
-5. **Build vertical on Days 1-5, horizontal on Days 6-8, tune on Days 9-10.** Specifically: by end of Day 5, a single terminal should be able to enroll a face, detect it during an exam, flag absence, and display the alert on a Streamlit dashboard. This is the minimum viable demo. Everything else is incremental.
+**Tier 3 — Polish (if time permits after Day 7):**
+17. Common-mode audio rejection at edge
+18. Post-exam summary report
+19. Scalability one-pager for jury
+20. Gaze baseline calibration protocol (10s during enrollment)
+21. Fallback demo video (Day 9, non-optional)
 
-6. **On Day 0, run three parallel spikes:** (a) PyInstaller packaging with MediaPipe + ONNX on Windows, (b) webcam capture reliability on target hardware, (c) Streamlit dashboard proof-of-concept with WebSocket updates. Any spike that fails triggers an immediate pivot (WinPython, external webcam, FastAPI+HTMX respectively).
-
-7. **Keep audio VAD (Silero) but implement common-mode rejection as part of the same work item.** Don't treat them as separate features. The audio pipeline is: Silero VAD on terminal → audio event to edge → edge checks for common-mode (3+ terminals in 500ms) → suppress or propagate. This is one coherent feature, not two.
-
-8. **Fix the document inconsistencies** (40 vs 30 terminals, evidence flow contradiction, privacy claims) before presenting to the jury. The technical architecture is strong; the narrative needs to match.
+**One final suggestion the panel hasn't discussed: demo choreography.** On demo day, the order in which you demonstrate scenarios matters enormously. Start with the highest-confidence detections (CANDIDATE_ABSENT, MULTIPLE_PERSONS) to build jury confidence, then show FACE_MISMATCH + seat-swap cross-identification as the "wow" moment, then gaze + audio fusion. Never start with the noisiest detection channels. This is a presentation strategy, not an architecture decision, but it directly impacts the 8/10 score.
 
 KEY_TRADEOFFS:
 
-1. **Streamlit vs. React for dashboard:** Loses custom real-time visualizations and fine-grained UI control. Gains 1.5-2 days of schedule and eliminates a JavaScript build toolchain dependency. For hackathon, this is unambiguously correct. For production, React would be revisited.
+1. **UI-agnostic agent (local HTTP API) vs. tightly-coupled PyQt6:** Adds ~2 hours of abstraction work upfront but eliminates the single largest existential risk (deployment failure). Every reviewer agrees deployment is the #1 risk. This is the correct investment. **Right tradeoff.**
 
-2. **JSONL + async SQLite vs. direct SQLite writes:** Adds a small delay (up to 2 seconds) between event occurrence and dashboard visibility. Eliminates write contention entirely. For a system where alert latency target is "under 2 seconds," this is acceptable — the events are logged immediately to durable storage (JSONL), only the dashboard query path has the delay.
+2. **Audio as bonus/fusion-only vs. audio as standalone detection:** All three reviewers now converge on conservative. The 30-mic physics problem dominates. Audio should contribute to fusion and rarely fire standalone. Missing a 3-second whisper is acceptable; generating 15 false positives is not. **Right tradeoff for this demo context**, though in production with individual rooms the threshold should drop.
 
-3. **Keeping audio VAD vs. dropping it entirely (Gemini's suggestion):** Audio adds implementation cost (~1 day) and false positive risk. But it covers a malpractice category (whispering, dictating answers) that no visual detector can catch. With common-mode rejection, the FP risk is manageable. Dropping it means the system is blind to an entire category of cheating, which the jury will likely test. I believe including it with conservative thresholds is the right trade.
+3. **Cross-terminal seat-swap detection vs. simpler per-terminal-only matching:** Adds ~2 hours of work (embedding sync + edge-side 1:N matching) but creates the single most memorable demo moment. The jury will almost certainly stage a seat swap. Identifying *which* candidate is at the wrong terminal, not just "this isn't the right person," is a qualitative leap in capability. **Clearly the right tradeoff.**
 
-4. **Hash-chain logging: include but don't oversell.** Two hours of implementation for a credible "evidence integrity" narrative. The tradeoff is spending time on something that's more about optics than security. For a government hackathon where compliance language matters, this is worth it. For a purely technical evaluation, it wouldn't be.
+4. **CCTV stub (display-only) vs. CCTV AI vs. no CCTV:** Display-only is the Pareto-optimal point for the demo. Full CCTV AI is high-risk with marginal demo benefit. No CCTV is a compliance failure. **Universal consensus, right tradeoff.**
 
-5. **Vertical-slice development vs. parallel feature development:** Vertical-slice means the dashboard might look basic on Day 5 while individual detectors could have been further along with parallel work. But vertical-slice guarantees a demoable system at every point in the schedule. Given the unanimous concern about schedule risk, this is the only responsible approach.
+5. **Both packaging options (WinPython + PyInstaller fallback) vs. committing to one:** Doubles the testing surface on Day 0 but halves the probability of deployment failure. For a hackathon where you get one shot, redundancy in deployment strategy is worth the prep cost. **Right tradeoff.**
+
+6. **Overall scope question — are we doing too much?** This is the meta-tradeoff. The Tier 0-1-2-3 prioritization above explicitly addresses this. If the team executes Tier 0 + Tier 1 items 8-10 + Tier 2 items 13-14, they have a winning demo. Items 15-21 are genuine "nice to have." The risk is not scope creep per se, but rather spending too long perfecting lower-tier items at the expense of rock-solid Tier 0 execution. **The schedule must be milestone-gated: if Tier 0 isn't complete by Day 5, all Tier 2+ items are cut.**
 
 ### GPT-5.2
 
 POSITION: PARTIALLY_AGREE
 
 REASONING:
-My position is unchanged (still PARTIALLY_AGREE), but the *confidence on what will make or break the system* has shifted further toward **deployment/runtime constraints** rather than model selection. Claude and Gemini’s feedback reinforces (and sharpens) the same core thesis: edge/on-terminal inference is correct, but the plan risks failing in practice due to **RAM pressure, packaging brittleness, time sync, and evidence/network contradictions**.
+My position has shifted slightly: the **core topology is still correct**, but I now consider the current proposal **not “battle-ready to win” unless you apply 4–5 specific changes immediately**. The other participants’ feedback strengthened the case that your biggest threats are *demo optics + operational reliability*, not ML modeling.
 
-Arguments that changed (or strengthened) my stance:
-- **Drop Electron is no longer “nice”; it’s mandatory** on 4GB/Celeron. Both Claude and Gemini quantify memory + swapping risk more convincingly than the original plan.
-- **Time synchronization is a first-class requirement** because the confusion matrix is an explicit scoring metric. Without an offset mechanism, you can “lose points” even if detections are correct.
-- **Evidence path must be made consistent**. I now strongly converge with Claude/Gemini: “dashboard requests from terminals” creates inbound connectivity/security complexity that is not hackathon-robust.
+1) **Have any arguments changed my position?**
+- **Yes—audio and posture need stronger containment.** Claude’s updated take (audio is a “physics problem”) is correct. In a single-room, 30-mic setup, standalone audio is very likely to hurt precision unless you add edge-side suppression. Likewise, posture as standalone is too FP-prone; fusion-only is the right move.
+- **Yes—ground truth needs a “trigger app”.** Gemini’s “Malpractice Trigger” app is a high-leverage idea: it makes your confusion matrix credible and reduces reliance on perfect clock sync between humans and system.
+- **Yes—CCTV cannot be zero.** Consensus is right: even a dumb CCTV tile is better than an explanation. This is demo scoring/requirements compliance, not engineering purity.
 
-Where I disagree with others (honestly, not academically):
-- I don’t fully agree with “drop React” as a blanket rule. React adds build complexity, but it’s not the primary runtime risk (the dashboard runs on the edge/proctor machine, not on Celeron clients). A smaller UI stack (HTMX/Streamlit) is attractive, but switching frameworks late can also burn time. The key is: **dashboard must be local-first and stable**, regardless of framework.
-- I don’t agree with “gaze must never be standalone” as a hard rule. I agree gaze is high-FP, but for a hackathon demo it can still be a standalone **low-severity “attention” signal** (not malpractice) while only contributing to high-confidence malpractice via fusion. The semantic framing matters as much as the detector.
+2) **Which concerns from others do I agree/disagree with?**
+- **Agree strongly** with Claude + Gemini:
+  - CCTV minimal stub is mandatory.
+  - Seat swap must be identified cross-terminal (not just “mismatch”).
+  - Multi-terminal integration on Day 8 is too late.
+  - Audio crosstalk will create false positives without suppression.
+- **Partial disagreement / nuance:**
+  - **PyQt6 vs Browser UI:** I align more with Gemini/Claude that browser UI is faster and more robust *for hackathon velocity*. But I don’t think PyQt is inherently “wrong”—it’s wrong **if it becomes the critical path** (layout polish + packaging fragility). The safer stance is: *headless agent + browser exam UI* as primary, PyQt as optional fallback only if your team is already fluent and can keep it minimal.
+  - **PyInstaller as “the answer”:** I still disagree with making PyInstaller the primary bet. AV false-positives and huge bundles are real. Carry both WinPython portable and PyInstaller `--onedir`, choose after Day-0 tests.
 
-Common ground across all reviewers:
-- LAN-first, edge-hosted dashboard; cloud optional.
-- Drop Electron; keep agent lightweight.
-- Evidence should be **push-to-edge on alert**, not pull-from-terminal.
-- Implement time sync via edge heartbeat/offset.
-- Avoid SD-card Pi bottlenecks; prefer mini-PC or Pi+USB SSD.
-- Keep fusion minimal and explicit; don’t build a generic rules engine.
+3) **Common ground (high-confidence convergence)**
+There is strong convergence across all reviewers that the winning path is:
+- Keep the edge/terminal split + episode semantics.
+- Add **CCTV stub**, **cross-terminal seat-swap**, **early multi-terminal testing**, **audio suppression**, **fusion-only posture**, and **better ground truth instrumentation**.
 
 CONCERNS:
-1. **Client RAM saturation (consensus):** Electron + Python inference + Windows on 4GB will swap and destroy FPS/stability.
-2. **Packaging/deployment fragility (consensus):** PyInstaller + MediaPipe + ONNX on Windows + Defender false positives is a critical-path risk; needs an early spike and fallback plan.
-3. **Time synchronization (consensus, demo-critical):** Clock drift breaks ground-truth matching and the confusion matrix, directly harming scoring.
-4. **Evidence architecture contradiction (consensus):** “Never transmitted” conflicts with “dashboard can request”; pull-based evidence also creates inbound terminal networking/security complexity.
-5. **Edge I/O bottleneck / SPOF (consensus):** Pi+SD + SQLite single-writer + bursty events → lock contention and/or latency spikes.
-6. **Audio cross-talk (consensus):** Without edge-level common-mode rejection, VAD events become correlated ambient noise → FP spikes and misleading fusion.
-7. **Fusion underspecification (consensus):** Missing clear rules for temporal windows, dedupe/out-of-order, and conflict handling leads to “works in unit tests, fails live.”
-8. **Security claims overreach:** Hash-chain is not meaningful tamper-proofing if endpoints aren’t trusted; kiosk/lockdown remains undefined and is a real evasion risk.
-9. **YOLOv8 licensing (Claude):** AGPL is fine for hackathon, problematic for any government “production-ready” claim.
+1. **CCTV “missing feature” penalty:** No CCTV at all is an easy judge objection/disqualifier.
+2. **Seat swap marquee scenario:** Without edge-side global embedding lookup, you may miss or under-explain the most likely staged event.
+3. **Audio crosstalk mass false positives:** One loud speaker can light up many terminals; without edge suppression it will wreck precision and the confusion matrix.
+4. **UI + deployment fragility:** PyQt6 + Python stack on unknown Windows desktops can fail to launch or behave inconsistently (drivers, permissions, AV, missing runtimes).
+5. **Ground-truth timing credibility:** If human logs and system timestamps don’t align tightly, your confusion matrix will be challenged even if detections are good.
+6. **Standalone posture/gaze thresholds:** Risk of flagging normal test-taking behavior (reading down, thinking, glancing) → FP flood.
+7. **Late scale testing:** Discovering LAN/backpressure/DB contention at Day 8 risks unrecoverable instability.
 
 SUGGESTIONS:
-1. **Make the terminal agent a single lightweight Python app (PyQt/Tkinter/minimal UI).** Drop Electron entirely; decouple “exam UI” from “proctor inference” only if you can do it without adding heavy dependencies.
-2. **Adopt push-based evidence:** on high/critical alerts, terminal POSTs encrypted snapshots to edge (LAN), edge serves to dashboard. Stop claiming “nothing leaves terminal”; instead claim “no continuous video leaves terminal.”
-3. **Implement explicit time sync now:** edge returns `edge_time_ms` in heartbeat; terminal computes `offset_ms` and stamps events with both `local_time_ms` and `edge_aligned_time_ms`.
-4. **Fix edge write path:** write events as **append-only JSONL per terminal** (or per session) and ingest asynchronously into SQLite for querying. If SQLite is retained for primary storage, require **mini-PC/SSD** and WAL mode.
-5. **Add audio common-mode rejection at edge:** if ≥N terminals trigger within 500ms–1s, suppress/downgrade as ambient event (and record it separately).
-6. **Use “detect → track → verify” to cut CPU and reduce flicker:** run face detection at lower FPS, track ROIs between detections; verify identity at a slower cadence unless risk escalates.
-7. **Define degradation modes and surface them:** mic unavailable → audio disabled; FPS < threshold → disable gaze/objects; webcam failure → explicit terminal fault state.
-8. **Keep fusion small and testable:** 2–3 fusion rules with a single correlation window (e.g., 10s) and simple dedupe keys; don’t build an extensible rule engine for the hackathon.
-9. **Day-0 packaging spike + fallback:** if PyInstaller is unstable/flagged, pivot to portable Python distribution (WinPython/embedded) + signed binaries if possible.
+1. **Add a minimal CCTV stub (must-do):**
+   - Edge server: RTSP/USB ingest → display tile on dashboard.
+   - Optional: background subtraction / motion heatmap overlay (no heavy AI).
+   - Goal: never answer “we didn’t do CCTV”; you show “integrated feed + activity highlighting.”
+
+2. **Implement cross-terminal seat-swap detection (must-do differentiator):**
+   - During enrollment, push/store embeddings centrally on edge.
+   - On FACE_MISMATCH/UNCERTAIN, edge compares probe embedding vs all enrolled and emits:
+     - `CONFIRMED_SEAT_SWAP {from_terminal, to_terminal, matched_candidate_id, score}`
+   - This is both a compliance win (impersonation) and a demo “wow”.
+
+3. **Adopt the “Malpractice Trigger” app (high ROI):**
+   - Mobile web page served by edge with 6 big buttons + terminal selector.
+   - Logs ground truth timestamps directly to the same DB → cleaner matching and better narrative.
+
+4. **Contain audio to protect precision:**
+   - Keep 10s threshold conservative **or make audio fusion-only** by default.
+   - Add edge-side suppression: if ≥N terminals trigger within 300–800ms, only keep the **highest-amplitude** (or highest-confidence) terminal; suppress the rest as common-mode.
+
+5. **Make SUSPICIOUS_POSTURE fusion-only:**
+   - Never emit standalone posture alerts.
+   - Only contribute to `POSSIBLE_MATERIAL_USE` when paired with gaze and/or UI inactivity.
+
+6. **Earlier integration testing (schedule correction):**
+   - Move “3–5 terminals end-to-end” to Day 4/5.
+   - Stress to 10+ as soon as you have basic events, not after UI polish.
+
+7. **Deployment hardening:**
+   - Build a **pre-flight diagnostic** script/tool: camera open, mic levels, write permissions, model load, ONNX runtime present.
+   - Ship both WinPython portable and PyInstaller `--onedir`; decide on-site.
+
+8. **Re-add tamper-evident hash chaining (cheap compliance):**
+   - JSONL: `hash_i = sha256(hash_{i-1} + canonical_json(event_i))`
+   - Minimal code, directly addresses “tamper-proof logs” expectation.
 
 KEY_TRADEOFFS:
-- **Privacy purity vs workable evidence review:** Keeping all evidence local is clean on paper but operationally weak (tampering, no centralized review). Pushing alert-triggered snapshots to edge sacrifices strict locality but makes the system reviewable and demoable.
-- **Feature count vs credibility:** Adding gaze/audio/object detectors increases “wow,” but each adds FP and integration risk. The right trade for hackathon scoring is **precision + stability**, with “softer” signals (gaze/audio) framed as supporting evidence or low-severity cues.
-- **Simpler storage vs queryability:** JSONL append-only logs are robust under burst load; SQLite/Postgres improves queries. Hybrid (JSONL source-of-truth + async ingest) is the pragmatic balance.
-- **Framework choice vs time-to-demo:** React vs HTMX/Streamlit is less important than LAN-first operation and robust agent packaging. Choose the stack the team can finish reliably; avoid mid-sprint rewrites unless React becomes a schedule risk.
+- **Browser UI vs PyQt6:** Browser UI trades some RAM for *much higher velocity and launch reliability* on unknown Windows machines. For a 7–10 day hackathon, that trade is usually correct. PyQt is acceptable only if it’s not the critical path and packaging is proven early.
+- **Audio recall vs precision:** In a single-room 30-terminal demo, optimizing for recall on audio is self-defeating. Conservative thresholds + suppression (or fusion-only audio) is the right trade to satisfy “minimize false alarms.”
+- **CCTV AI depth vs compliance:** A shallow CCTV integration beats a deep but risky CCTV model. The right trade for demo day is “show the feed + simple activity overlay.”
+- **Edge simplicity vs seat-swap clarity:** Cross-terminal matching adds complexity but buys a decisive differentiator and directly targets likely staged events. This is the right complexity to add.
 
 ### Gemini 3 Pro
 
 POSITION: PARTIALLY_AGREE
 
 REASONING:
-There is now **unanimous consensus** among all three reviewers on the critical flaws in the proposal. We all agree that the current plan is technically feasible *in theory* but operationally doomed *in practice* due to resource constraints and architectural contradictions.
+There is now **unanimous consensus** across the panel on the critical path to winning: the AI architecture is sound, but the **Engineering Strategy** (UI choice, Deployment, Integration Schedule) contains fatal risks.
 
-My position has evolved based on the feedback:
-1.  **I concede on the Message Broker:** Claude Opus is correct. For a 10-day hackathon, setting up NATS/Mosquitto is unnecessary operational overhead. The **Append-Only File (JSONL)** approach supported by GPT-5.2 is the superior "middle path" that solves the locking issue without adding a new daemon.
-2.  **I strongly endorse the "Mini-PC" Hardware Change:** Claude’s suggestion to upgrade from a Raspberry Pi to a used/refurbished Mini-PC (or at least adding a USB SSD) is the most pragmatic fix for the I/O bottleneck. It solves the hardware constraint with budget (₹3-5k extra) rather than complex software engineering.
-3.  **Validation of "Push" Architecture:** All reviewers agree that the dashboard "pulling" evidence from terminals is a security and networking dead-end. The architecture *must* change to terminals pushing encrypted snapshots to the edge.
+1.  **The "Headless" Consensus:** All reviewers identify the PyQt6 UI as a velocity and stability risk. GPT-5.2's proposal to decouple (Headless Python Agent + Browser UI) is the superior architectural compromise. It eliminates the time-sink of Qt layouts while preserving Python for the AI pipeline.
+2.  **The "Seat Swap" Gap:** All reviewers agree that the current design fails to detect a specific "Candidate A moves to Terminal B" scenario. This is a high-probability demo event. The Edge Server *must* perform cross-terminal embedding matching.
+3.  **CCTV & Audio Realism:** We all agree that a "CCTV Stub" is mandatory for compliance, and that "Audio Crosstalk" in a single room requires physics-aware filtering (common-mode rejection), not just threshold tuning.
 
 CONCERNS:
-1.  **The "Electron" Suicide Pact (Consensus):** We all agree: running Electron + Python Inference on 4GB RAM is non-negotiable. It will fail. The proposal must pivot to a lightweight UI (PyQt/Tkinter) immediately.
-2.  **Packaging as the "Day 0" Boss:** The risk of `PyInstaller` failing to package MediaPipe/ONNX correctly (or triggering Windows Defender) is correctly identified by all as a critical path failure mode. This is not a "Day 1" task; it is a "Day 0" Go/No-Go gate.
-3.  **Gaze Tracking False Positives:** I agree with Claude’s assessment that Gaze Tracking is the most dangerous detector for a live demo. A student "thinking" looks exactly like a student "cheating" to a basic yaw threshold. If this fires during the demo while a student is innocent, credibility is lost.
-4.  **Time Synchronization:** GPT-5.2 and Claude correctly elevated this. Without explicit NTP-like offsets, the "Confusion Matrix" deliverable is mathematically impossible to generate accurately.
-5.  **Audio Cross-Talk:** The physics of sound in a shared room remains a hard blocker for individual audio alerts without the "Common Mode Rejection" logic we've discussed.
+1.  **The "Seat Swap" Blind Spot:** (Aligned with all) If you only check face mismatch locally, you miss the "Impersonation by another valid candidate" scenario. This is a specific, high-value demo case you will currently fail.
+2.  **Deployment "Works on My Machine":** (Aligned with GPT-5.2 & Claude) Relying solely on WinPython or solely on PyInstaller is reckless. Windows permissions/AV on exam terminals are unpredictable.
+3.  **Audio Physics:** (Aligned with Claude) In a quiet exam hall, a cough or whisper triggers 5-10 nearby microphones. Without amplitude comparison at the Edge, the dashboard will light up like a Christmas tree (False Positive disaster).
+4.  **Late Integration:** (Aligned with all) Testing multi-terminal networking on Day 8 is a death sentence. Network congestion and database locking need to be solved on Day 4.
 
 SUGGESTIONS:
-1.  **Unified "Push" Architecture:**
-    *   **Agent:** Single Python process (PyQt6).
-    *   **Communication:** Agent POSTs heartbeat (JSON) and Alerts (JSON + Base64 Image) to Edge.
-    *   **Edge:** Writes to Append-Only JSONL files per terminal. Dashboard reads these files. No inbound connections to terminals.
-2.  **Hardware Upgrade:** Swap the Raspberry Pi for a generic **Intel NUC/Mini-PC (used)** or enforce **USB 3.0 SSD** boot for the Pi. Do not run on SD cards.
-3.  **Signal Demotion:**
-    *   **Audio:** Only flags if independent (checks against other terminals' timestamps).
-    *   **Gaze:** **Demote to Secondary Signal.** Never triggers an alert on its own. Only increases the "Risk Score" or corroborates a Phone/Voice detection.
-4.  **Optimization Loop:** Adopt Claude’s **"Detect (5fps) → Track (30fps) → Verify (0.5fps)"** pattern. This is the standard industry approach to reduce CPU load while maintaining "smooth" UI boxes.
-5.  **Day-0 Smoke Test:** Before writing a single line of feature code, create a "Hello World" PyInstaller exe that loads MediaPipe and opens the webcam. If this crashes on the target OS, the entire tech stack must be re-evaluated immediately.
+1.  **Adopt the "Headless Agent + Browser UI" Pattern:**
+    *   **Architecture:** `agent.exe` (Python) runs in the tray. It spins up a minimal `localhost` WebSocket server and handles camera/AI.
+    *   **UI:** The exam interface is a standard HTML/JS file opened in the system's default browser (Chrome/Edge), communicating with the agent via local WebSocket.
+    *   **Benefit:** Zero Qt layout code. Zero browser permission issues (agent handles hardware). fast UI iteration.
+
+2.  **Implement Edge-Side "Seat Swap" Logic:**
+    *   **Change:** Push all enrollment embeddings to the Edge Server (in RAM).
+    *   **Logic:** When Terminal A sends a `FACE_MISMATCH` alert with the intruder's embedding, the Edge Server searches the global list.
+    *   **Result:** Instead of "Unknown Person", the dashboard alerts: "**CRITICAL: Candidate B (from Terminal 5) detected at Terminal 1.**" This is a winning differentiator.
+
+3.  **Implement the "Malpractice Trigger" App (Endorsing Claude):**
+    *   Build the mobile web app for the actors/stagers.
+    *   **Why:** It creates perfect, microsecond-aligned ground truth logs that you control, removing human observer latency from the confusion matrix.
+
+4.  **Amplitude-Based Audio Voting:**
+    *   **Logic:** When the Edge Server receives `SUSPICIOUS_AUDIO` from multiple terminals within a 500ms window, it compares the reported RMS amplitude.
+    *   **Action:** Only display the alert for the terminal with the *loudest* signal. Suppress the neighbors.
+
+5.  **The "CCTV Stub" (Day 6):**
+    *   Do not over-engineer. Ingest RTSP -> Resize -> Display on Dashboard. Add a simple "Motion Detected" text overlay if pixel change > threshold. Done.
 
 KEY_TRADEOFFS:
-**Precision vs. Recall (The Demo Reality):**
-We are shifting the strategy from "Catch Everything" to "Never Cry Wolf."
-*   **Tradeoff:** By demoting Gaze and filtering Audio, we will miss some subtle cheating (Recall drops).
-*   **Benefit:** The dashboard will stay green when students are innocent, and only turn red for obvious events (Phone, Absence, Face Swap). This ensures the jury trusts the system.
-
-**Infrastructure vs. Code:**
-*   **Tradeoff:** Spending ₹5k more on a Mini-PC/SSD reduces the budget margin.
-*   **Benefit:** It eliminates the need to write complex buffering/retry logic for SD card latency. Hardware solves the software problem cheaper than developer time does.
+**Headless+Browser vs. PyQt:** You accept a slightly complex local WebSocket handshake to gain massive **Development Velocity** and **UI Polish**. This is the correct trade-off for a 7-day timeline.
+**Edge-Side Matching vs. Local-Only:** You accept higher RAM usage on the Edge Server (storing all embeddings) to gain the ability to detect **Internal Impersonation**. This directly targets the "Seat Swap" scenario.
+**Amplitude Voting vs. Simple Thresholds:** You trade "detecting every whisper" (Recall) for "not flooding the dashboard" (Precision). In a demo with 30 terminals in one room, **Precision is the only metric that matters.**
 
 ---
 ## Final Positions
@@ -518,102 +717,89 @@ We are shifting the strategy from "Catch Everything" to "Never Cry Wolf."
 CONSENSUS_LEVEL: NEAR
 
 COMMON_GROUND:
-1. Edge-first, on-terminal inference is the correct architectural choice given 4G unreliability, bandwidth constraints, privacy requirements, and 30-terminal scale.
-2. Drop Electron entirely. Running Electron + Python inference on 4GB/Celeron machines will cause swap thrashing and destroy real-time performance. The agent must be a single lightweight Python process.
-3. Evidence architecture must be push-based, not pull-based. Terminals push encrypted snapshots to the edge server on high/critical alerts over LAN. Dashboard reads from edge. No inbound connections to terminals. Update privacy claims from "nothing leaves the terminal" to "no continuous video leaves the terminal; only alert-triggered stills are transmitted over encrypted LAN."
-4. Time synchronization is a first-class requirement. Edge server provides reference timestamp in heartbeat; terminals compute and apply offset to all event timestamps. Without this, the confusion matrix scoring (an explicit jury deliverable) becomes unreliable due to clock drift.
-5. Raspberry Pi with SD card is an I/O bottleneck and single point of failure under concurrent writes from 30 terminals. Mitigate with either a mini-PC with SSD or at minimum a Pi with USB 3.0 SSD.
-6. Edge server write path should use append-only JSONL files (one per terminal) for the primary write path, with asynchronous ingestion into SQLite for dashboard queries. This eliminates write contention without adding infrastructure (no NATS/Mosquitto/Redis needed).
-7. Audio cross-talk in a shared 30-terminal room will produce correlated false positives without edge-level common-mode rejection. If ≥3 terminals trigger audio alerts within a ~500ms window, suppress/downgrade as ambient noise.
-8. Gaze deviation is the highest false-positive risk detector and should be demoted from standalone alert to a supporting/fusion-only signal. It should never trigger an alert on its own.
-9. PyInstaller + MediaPipe + ONNX Runtime packaging on Windows is a critical-path risk (dependency conflicts, DLL issues, Windows Defender false positives on unsigned binaries accessing webcam). This requires a Day-0 spike before the development sprint begins, with a validated fallback plan (e.g., portable WinPython distribution).
-10. Precision over recall is the correct optimization strategy for the hackathon demo. Every false positive the jury witnesses undermines credibility more than a missed detection. Tune thresholds conservatively.
-11. The scope reduction from 20 features to ~6 core features is correct and necessary, but the 10-day schedule still has no buffer and remains the biggest non-technical risk.
-12. The dashboard must be LAN-first (hosted on the edge server). Cloud/4G mirroring is optional. The demo must be fully functional without internet connectivity.
-13. Vertical-slice development is mandatory: get one detection type flowing end-to-end (webcam → face detect → face verify → event to edge → dashboard display) by Day 5 before adding more detectors horizontally.
-14. A "detect → track → verify" pattern (face detection at lower FPS, lightweight ROI tracking between detections, identity verification at slower cadence) would significantly reduce CPU load and eliminate transient "face absent" flicker from frame drops.
-15. Explicit degradation modes must be defined and surfaced on the dashboard: mic unavailable → audio disabled; face mesh fails → gaze disabled; FPS below threshold → reduce to face presence + multi-face only; webcam failure → explicit terminal fault state.
-16. The multi-modal fusion logic is underspecified in the proposal. It needs concrete temporal correlation windows, deduplication rules, and conflict handling — but should be kept minimal (2–3 rules with a single ~10s window) rather than building a generic rules engine.
-17. Adding a message broker (NATS/Mosquitto/Redis) is unnecessary complexity for a hackathon with 30 terminals at low event rates. In-memory queues + JSONL files are sufficient.
-18. The proposal contains internal contradictions and inconsistencies (40 vs 30 terminals, evidence flow claims) that must be reconciled before jury presentation.
+1. The core architecture (terminal-side lightweight inference + edge-side aggregation/dashboard + episode-based events + no raw video uplink + no cloud dependency) is sound and should not change.
+2. Cross-terminal seat-swap detection on the edge server is the single highest-ROI feature addition — enrollment embeddings must be pushed to edge, and on FACE_MISMATCH the edge must compare against all enrolled candidates and emit CONFIRMED_SEAT_SWAP with both terminal IDs.
+3. A minimal CCTV stub is mandatory — RTSP/USB ingest displayed on the dashboard with optional background subtraction/motion overlay, no AI detection. Completely omitting CCTV is an unforced compliance failure against a stated requirement.
+4. SUSPICIOUS_POSTURE must be fusion-only — never fire standalone, only contribute through fusion rules (POSTURE + GAZE → POSSIBLE_MATERIAL_USE). Standalone head-pitch alerts will generate excessive false positives from normal reading/thinking behavior and destroy the confusion matrix.
+5. Audio crosstalk in a 30-mic single room is a physics problem. Common-mode rejection at the edge server is required: buffer VAD events for 300-800ms, if multiple terminals trigger simultaneously suppress all but the highest-amplitude source. The 10s standalone threshold should remain conservative.
+6. Multi-terminal integration testing must move to Day 4-5 (3+ terminals), not Day 8. Late discovery of LAN congestion, SQLite contention, and firewall issues is a project-ending risk.
+7. Hash-chaining for tamper-evident JSONL logs should be re-added — trivial implementation (~30 lines), directly addresses a stated requirement in the challenge spec.
+8. Deployment on unknown government Windows machines is the single most likely cause of demo-day failure. A pre-flight diagnostic script/tool (camera, mic, ONNX runtime, write permissions, network) must be built and run on every terminal before deployment.
+9. Both WinPython portable and PyInstaller --onedir should be prepared; the decision of which to use should be made after Day 0 hardware testing, not committed to in advance.
+10. A fallback demo video must be recorded on Day 9 — a flawless 3-minute screen capture of the entire flow as insurance against demo-day failures.
+11. The ground-truth "Malpractice Trigger" app (mobile web page served from edge with 6 buttons + terminal selector for actors to log the exact moment they stage malpractice) is high-ROI and should be built — it creates microsecond-accurate ground truth and eliminates human observer timing errors from the confusion matrix.
+12. Capture resolution should be explicitly set to 640x480 to reduce CPU/memory load on 4GB machines.
+13. The FPS-based degradation ladder is a strong differentiator and should be made visible on the dashboard (not silent).
+14. The confusion matrix with 1:1 greedy matching, populated from ground-truth logs, is a key competitive differentiator most teams will lack.
+15. Demo choreography matters: start with highest-confidence detections (CANDIDATE_ABSENT, MULTIPLE_PERSONS) to build jury confidence, then show seat-swap cross-identification as the "wow" moment, then fusion alerts.
+16. SQLite write serialization on the edge server should use a single-writer async batching queue (flush every 250-500ms or on N pending events) to prevent SQLITE_BUSY errors under 30-terminal concurrency.
+17. A scalability one-pager (edge-server-per-hall model, cost breakdown ~₹25,000 per hall, metadata aggregation to district/state over 4G) should be prepared for the jury.
 
 CONVERGENCE:
-1. Evidence architecture: GPT-5.2 initially framed it as two options (fully local vs. on-demand retrieval); Claude focused on the security surface of inbound connections; Gemini focused on networking complexity. All converged by Round 2-3 on push-to-edge as the single correct approach.
-2. Edge server I/O strategy: Claude initially defended SQLite in WAL mode; Gemini initially suggested NATS/Mosquitto; GPT-5.2 proposed JSONL. By Round 3, all three converged on JSONL-per-terminal as the write path with async SQLite ingestion for queries, and Gemini explicitly conceded on the message broker.
-3. Gaze demotion: Claude initially suggested cutting audio VAD instead of gaze; GPT-5.2 initially flagged gaze as high-FP but left it as a standalone signal. By Round 2-3, all three converged on demoting gaze to fusion-only, though GPT-5.2 retains a minor nuance (see Remaining Disagreements).
-4. Dashboard technology: Claude initially suggested HTMX/Jinja2 as an alternative to React; Gemini suggested Streamlit; GPT-5.2 was framework-agnostic. By Round 3, Claude and Gemini converged on Streamlit as the recommended approach, while GPT-5.2 converged on "whatever the team can ship reliably."
-5. Audio VAD inclusion: Gemini initially suggested dropping audio entirely; Claude and GPT-5.2 argued for keeping it with Silero + conservative thresholds + common-mode rejection. By Round 3, Gemini accepted the common-mode rejection approach implicitly (suggesting audio "only flags if independent"), effectively converging on "keep audio but with edge-level cross-terminal filtering."
+1. **Audio threshold direction**: Claude initially suggested lowering the audio threshold to 5 seconds, then explicitly retracted after Gemini raised the 30-mic crosstalk problem. All three converged on keeping 10s conservative threshold + edge-side amplitude-based common-mode rejection.
+2. **CCTV inclusion**: The original proposal cut CCTV entirely. All three reviewers independently flagged this as a strategic error and converged on a "display-only stub" as the Pareto-optimal solution.
+3. **Posture alert handling**: Reviewers initially ranged from "drop it entirely" (Claude R1) to various gating mechanisms. All converged on GPT-5.2's "fusion-only" formulation by Round 2.
+4. **Integration testing timing**: The original schedule had multi-terminal testing at Day 8. All three reviewers converged independently on moving this to Day 4-5.
+5. **Hash-chaining**: Originally cut from the proposal. GPT-5.2 raised re-adding it in Round 1; by Round 2-3 all reviewers agreed the minimal implementation cost justified compliance.
+6. **Seat-swap detection**: Not in the original architecture. Claude raised it in Round 1; by Round 2 all three reviewers elevated it to the highest-ROI addition.
 
 REMAINING_DISAGREEMENTS:
-1. **Dashboard framework (React vs. Streamlit vs. HTMX):**
-   - Claude (Round 3): Fully endorses Streamlit; says it delivers 80% visual impact at 20% dev cost and frees 1.5-2 days.
-   - Gemini (Round 3): Strongly endorses Streamlit or FastAPI+HTMX; says it cuts frontend dev time by 60%.
-   - GPT-5.2 (Round 3): Does not endorse a specific switch; argues the dashboard runs on the edge/proctor machine (not on Celeron clients) so React isn't the primary runtime risk; warns that switching frameworks mid-sprint can also burn time; says "choose the stack the team can finish reliably."
+1. **PyQt6 vs. Browser-based exam UI as the primary path:**
+   - **GPT-5.2**: Advocates headless Python agent + browser-based exam UI as primary. Browser UI offers dramatically higher deployment reliability and faster UI development velocity. PyQt6 acceptable only as optional fallback.
+   - **Gemini 3 Pro**: Strongly advocates the headless agent + browser UI pattern. Argues PyQt6 is a "velocity trap" where 50% of time is spent fighting Qt layouts. Proposes local WebSocket communication between agent and browser.
+   - **Claude Opus**: Acknowledges deployment risk of PyQt6 but identifies hidden costs in the browser approach: (a) requires a second communication protocol (local WebSocket) between headless agent and browser, (b) browser webcam permission dialogs can be silently blocked by confused students, (c) kiosk lockdown is fragile in a browser. Proposes a UI-agnostic local HTTP API as an abstraction layer so both paths remain viable, with the choice made on Day 0-1 based on hardware reality. Does not endorse browser-first as strongly as the other two.
 
-2. **Gaze as standalone low-severity signal vs. strictly fusion-only:**
-   - Claude (Round 3): Gaze should never generate any standalone alert; only used to boost other detectors via fusion.
-   - Gemini (Round 3): Agrees with Claude — demote to secondary signal, never triggers alert on its own.
-   - GPT-5.2 (Round 3): Partially disagrees — gaze can still be a standalone low-severity "attention" signal (explicitly not labeled "malpractice") while contributing to high-confidence malpractice only via fusion. Argues the semantic framing matters.
-
-3. **Whether to keep Audio VAD and Object Detection or cut further:**
-   - Claude (Round 3): Keep Audio VAD (with Silero + common-mode rejection) as a core feature; keep Object Detection as a stretch goal for Day 7. Argues dropping to only 3 detectors makes the system too thin to hit 8/10 detection.
-   - GPT-5.2 (Round 3): Keep Audio VAD with conservative thresholds and common-mode rejection; object detection is a nice-to-have.
-   - Gemini (Round 3): Would prefer dropping both Audio VAD and Object Detection entirely to focus on Face Verification + Gaze + Absence for maximum stability. Argues "a rock-solid demo of 3 features beats a flaky demo of 6."
-
-4. **Hash-chain logging value:**
-   - Claude (Round 3): Worth ~2 hours of implementation for the "evidence integrity" narrative with government evaluators; include but don't oversell.
-   - GPT-5.2 (Round 3): Calls it "close to security theater" without an external trust anchor; skeptical of value.
-   - Gemini (Round 3): Labels it "security theater" and lists it as a concern; implicitly not worth the time.
+2. **PyInstaller reliability assessment:**
+   - **Gemini 3 Pro**: Initially recommended PyInstaller --onedir as primary (Round 1), though softened by Round 3 to agreeing both should be prepared.
+   - **Claude Opus**: Explicitly argued against PyInstaller as primary due to antivirus false positives and large bundle sizes (~800MB-1.2GB). Recommends WinPython as primary with PyInstaller as fallback.
+   - **GPT-5.2**: Agreed neither should be the sole bet; carry both and decide after Day 0 testing.
 
 RECOMMENDED_PLAN:
 
-**Day -1 (Day 0): Go/No-Go Spikes (Before Sprint Begins)**
-- [ ] Build a minimal PyInstaller binary that loads MediaPipe + ONNX Runtime, opens a webcam, and runs BlazeFace on one frame. Test on Windows with Defender enabled. If it fails, prepare fallback: portable WinPython distribution on USB with pre-installed dependencies.
-- [ ] Test webcam capture reliability on target hardware (or closest available equivalent). Verify `cv2.VideoCapture` returns valid frames consistently. Identify USB webcam models that work.
-- [ ] Build a minimal Streamlit page that receives a WebSocket event and renders it. Validate this works as the dashboard approach. If Streamlit is rejected by the team (unfamiliar, too limiting), fall back to FastAPI + HTMX or whichever framework the team can ship fastest.
-- [ ] Confirm target OS (Windows 10/11 vs Ubuntu) with the department. All subsequent builds and tests target that OS only.
+**Architecture Decisions (lock immediately):**
+- [ ] Keep terminal-side inference + edge-side aggregation + episode-based events + no cloud dependency as the core topology — no changes needed.
+- [ ] Design the terminal agent from Day 1 to expose a local HTTP API (`/api/enrollment/status`, `/api/exam/state`, `/api/webcam/frame`) so the exam UI can be served either via PyQt6 or browser. This is the insurance policy against deployment failure — adds ~2 hours upfront, eliminates the existential UI/deployment risk.
+- [ ] Choose PyQt6 vs. browser-based UI on Day 0-1 based on hardware test results and team familiarity. Do not commit before testing on a non-dev machine.
+- [ ] Prepare both WinPython portable and PyInstaller --onedir packages. Test both on Day 0. Deploy whichever works on target hardware.
+- [ ] Set capture resolution explicitly to 640x480 on all terminals.
 
-**Architecture Decisions (Locked Before Day 1)**
-- [ ] **Agent:** Single Python process using PyQt6 for the exam UI (10 MCQs) and proctoring. No Electron. No separate browser.
-- [ ] **Edge Server:** Mini-PC with SSD (preferred) or Raspberry Pi 4 with USB 3.0 SSD. Never use SD card as primary storage.
-- [ ] **Dashboard:** Streamlit (or team's fastest framework) hosted on edge server, accessible over LAN. Cloud mirroring is stretch/optional.
-- [ ] **Evidence Flow:** Terminal pushes encrypted JPEG snapshots to edge via HTTP POST on high/critical alerts. Dashboard reads from edge. No inbound connections to terminals. Privacy claim: "No continuous video leaves the terminal; only alert-triggered stills transmitted over encrypted LAN."
-- [ ] **Event Logging:** Terminals write to local SQLite (store-and-forward). Edge writes incoming events to append-only JSONL files per terminal. Background worker ingests JSONL into SQLite every 2 seconds for dashboard queries.
-- [ ] **Time Sync:** Edge server includes `edge_time_ms` in every heartbeat response. Terminal computes `offset_ms = edge_time - local_time` at session start and stamps all events with both `local_time_ms` and `edge_aligned_time_ms`.
-- [ ] **Communication:** WebSocket for real-time events (terminal → edge → dashboard). REST for enrollment, session management, evidence retrieval from edge.
+**Must-Add Features (all reviewers agree these are non-negotiable):**
+- [ ] Cross-terminal seat-swap detection: push enrollment embeddings to edge during enrollment; on FACE_MISMATCH, edge compares probe embedding against all 30 enrolled candidates; emit CONFIRMED_SEAT_SWAP with both terminal IDs and candidate identifiers. Implement during Day 2-3 enrollment work.
+- [ ] CCTV display stub: edge server ingests RTSP stream (or USB camera fallback); display on dashboard tile; optional background subtraction motion overlay; no AI detection. Budget 2-4 hours on Day 6.
+- [ ] Hash-chaining for tamper-evident logs: `hash_i = sha256(hash_{i-1} || canonical_json(event_i))`, stored in each JSONL line. ~30 minutes, implement on Day 4-5.
+- [ ] Malpractice Trigger app: mobile-friendly web page served from edge server, 6 buttons (one per malpractice type) + terminal selector, logs `{terminal_id, malpractice_type, timestamp}` to edge DB. Build on Day 5.
+- [ ] Pre-flight diagnostic script: test camera open, mic open, ONNX runtime load, write permissions, LAN connectivity to edge. Run on every terminal within first 15 minutes of setup.
 
-**Signal/Detector Strategy (Locked Before Day 1)**
-- [ ] **Tier 1 (Must work flawlessly):** Face detection (BlazeFace), Face verification (MobileFaceNet, 3-zone hysteresis with all 5 enrollment embeddings), Multi-face detection, Candidate absence detection.
-- [ ] **Tier 2 (Include with safeguards):** Audio VAD (Silero, conservative 10s sustained-speech threshold, with edge-level common-mode rejection suppressing correlated events from ≥3 terminals within 500ms).
-- [ ] **Tier 3 (Stretch for Day 7-8):** Object detection (YOLOv8-nano for phones/books). Only include if Tier 1+2 are stable.
-- [ ] **Gaze tracking:** Include in the pipeline but demote to fusion-only. Never generates a standalone alert. Only boosts confidence of other detectors (e.g., gaze deviation + multi-face = collaboration; gaze down + phone detected = phone use confirmed). If the team wants, surface gaze as a low-severity "attention" indicator on the dashboard (not labeled malpractice) per GPT-5.2's suggestion, but do not count it in the confusion matrix.
-- [ ] **CCTV processing:** Cut entirely from hackathon scope.
-- [ ] **Multi-modal fusion:** Implement 2-3 explicit rules with a 10-second correlation window: (1) FACE_MISMATCH + any corroborating signal = CONFIRMED IMPERSONATION, (2) GAZE_DEVIATION + MULTI_FACE = LIKELY COLLABORATION, (3) GAZE_DOWN + PHONE_DETECTED = PHONE USE CONFIRMED. No generic rules engine.
+**Alert Strategy Modifications:**
+- [ ] Make SUSPICIOUS_POSTURE fusion-only. Remove standalone firing. Only contributes via POSTURE + GAZE → POSSIBLE_MATERIAL_USE (or POSTURE + UI inactivity >15s if exam UI reports last-interaction timestamps).
+- [ ] Keep SUSPICIOUS_AUDIO at 10s standalone threshold (conservative for demo).
+- [ ] Implement amplitude-based common-mode audio rejection at edge: buffer VAD events for 500ms; if ≥3 terminals trigger simultaneously, suppress all but the highest-amplitude source.
+- [ ] Prioritize the 4 highest-confidence alerts for standalone detection: CANDIDATE_ABSENT, MULTIPLE_PERSONS, FACE_MISMATCH, GAZE_DEVIATION. Treat AUDIO and POSTURE as fusion contributors.
 
-**Implementation Schedule (10 Days, Vertical-Slice First)**
+**Edge Server Hardening:**
+- [ ] SQLite write serialization: single async writer task consuming from an in-memory queue, batch-flushing every 250ms or on 50 pending events.
+- [ ] Store all enrollment embeddings in memory for cross-terminal matching.
+- [ ] Implement time sync: terminals stamp `t_capture_monotonic` and `t_capture_wall`; edge periodically measures offset with RTT compensation; store both raw and corrected times in all events.
 
-| Day | Tasks | Exit Criterion |
-|-----|-------|----------------|
-| **Day 1** | Project setup, threading architecture (capture → inference → network), webcam capture with retry/black-frame detection, BlazeFace face detection, CLAHE preprocessing, `--source` CLI flag for video file fallback. | Face bounding boxes rendered on live webcam feed. |
-| **Day 2** | Face enrollment (5-frame capture, 5 embeddings stored, "look straight" as primary), Face verification with 3-zone hysteresis (match <0.45, uncertain 0.45-0.70, mismatch >0.70 sustained 3+ checks). | Enroll face → verify match/mismatch working end-to-end. |
-| **Day 3** | Multi-face detection with persistence filtering (>5 consecutive frames). Candidate absence detection (>5 seconds). Gaze tracking (Face Mesh, baseline-relative 3-tier thresholds) as fusion-only signal. | All 4 detection types working on a single terminal. |
-| **Day 4** | Audio pipeline (Silero VAD, 10s sustained-speech threshold). Event logging (local SQLite store-and-forward). Edge server: FastAPI + WebSocket + JSONL event logging + async SQLite ingestion. Time sync in heartbeat. | Terminal sends events to edge; edge persists them. Audio fires on sustained speech. |
-| **Day 5** | Dashboard: terminal grid (30 tiles with status), live alert feed, basic stats. WebSocket integration for real-time updates. Simple exam UI (10 MCQs in PyQt6). | **Minimum Viable Demo:** One terminal enrolls → takes exam → detects absence/mismatch/multi-face → alert appears on dashboard in real-time. |
-| **Day 6** | Dashboard: terminal detail view, risk timeline. Audio common-mode rejection at edge. Push-based evidence snapshots (terminal → edge on high/critical alerts). Evidence viewer in dashboard. | Dashboard shows evidence images. Audio cross-talk is filtered. |
-| **Day 7** | (Stretch) Object detection (YOLOv8-nano). Multi-modal fusion rules (2-3 rules). Ground truth input interface for jury. | Object detection working if CPU allows; fusion rules tested. |
-| **Day 8** | Confusion matrix generator + ground truth comparison (±15s window using edge-aligned timestamps). Post-exam summary view. Detect-track-verify optimization if FPS is insufficient on target hardware. | End-to-end flow complete including scoring. |
-| **Day 9** | **Calibration exam:** Run all planned malpractice scenarios on actual (or closest available) hardware. Record raw detection scores. Tune thresholds empirically. Fix bugs. Define degradation modes and test them (disable mic → verify audio alerts stop gracefully, etc.). | Thresholds tuned to actual conditions. Degradation modes verified. |
-| **Day 10** | Demo rehearsal only. Practice 6-10 staged malpractice scenarios. Verify confusion matrix output. Prepare fallback plans (backup webcams, video file mode, pre-recorded scenarios). Fix document inconsistencies (40→30 terminals, evidence flow description). | Team can run the full demo smoothly with no surprises. |
+**Revised Schedule:**
+- [ ] Day 0: GO/NO-GO — pre-flight diagnostic on non-dev machine with restricted user account. Test both WinPython and PyInstaller. Decide UI approach (PyQt6 vs browser). Decide packaging tool.
+- [ ] Day 1: Webcam + 3 threads + BlazeFace + CLAHE + MOSSE tracker. Local HTTP API skeleton for UI-agnostic agent.
+- [ ] Day 2: Enrollment (5 embeddings, quality gates) + embedding push to edge. Face verification with 3-zone hysteresis. Edge server start with FastAPI + SQLite WAL + async write queue.
+- [ ] Day 3: Multi-face + absence + gaze (baseline calibration: 10s median+MAD during enrollment). FPS degradation modes. Episode-based event flow to edge.
+- [ ] Day 4: **HARD DEADLINE vertical slice with 3 terminals.** Events flow from 3 terminals → edge → dashboard tile. Discover LAN/SQLite/firewall issues here. Silero VAD integration. Time sync.
+- [ ] Day 5: Dashboard (terminal grid, alert feed, detail view, degradation status). Exam UI (MCQ + timer + navigation). Ground truth logger. Malpractice trigger app. **Minimum viable demo works end-to-end.**
+- [ ] Day 6: Evidence snapshot push. Common-mode audio rejection. Evidence viewer. Fusion rules. CCTV display stub. Hash-chaining. Cross-terminal seat-swap detection.
+- [ ] Day 7: Confusion matrix (1:1 greedy matching). Post-exam summary. Stress test with 5-10 terminals. Threshold tuning.
+- [ ] Day 8: Multi-terminal stress test (10+ terminals). Threshold tuning on real hardware. Scalability one-pager.
+- [ ] Day 9: Full calibration exam with ALL planned malpractice scenarios. Tune thresholds. **Record fallback demo video (3-minute flawless walkthrough).** This is non-optional.
+- [ ] Day 10: Demo rehearsal only. Practice 6-10 scenarios in presentation order. Prepare USB backups of both packaging options.
 
-**Demo Day Checklist**
-- [ ] 2-3 backup USB webcams
-- [ ] USB ring lights for consistent face illumination
-- [ ] PyInstaller binary (or WinPython portable) on USB drives, pre-tested on target OS
-- [ ] Pre-recorded fallback video file per terminal (swap `--source 0` to `--source fallback.mp4`)
-- [ ] Edge server mini-PC with SSD, Ethernet switch, LAN cables (do not rely on WiFi)
-- [ ] 10 MCQ questions loaded in exam UI
-- [ ] Ground truth logging interface ready for jury
-- [ ] Dashboard running on large screen/projector connected to edge server over LAN
-- [ ] Windows Defender exclusion configured for the agent executable on all terminals
-- [ ] All 6-10 malpractice scenarios rehearsed; team knows which scenarios to run and in what order
-- [ ] Document reconciled: evidence flow, privacy claims, terminal count, and architecture diagrams all consistent
+**Milestone Gate:**
+- [ ] If Tier 0 items (preflight, core pipeline, enrollment, edge server, dashboard, 3-terminal vertical slice) are not complete by end of Day 5, cut ALL Tier 2+ items (CCTV stub, hash-chaining, store-and-forward, evidence encryption) and focus exclusively on making the core 4 alert types + seat-swap detection + confusion matrix work flawlessly.
+
+**Demo Day Strategy:**
+- [ ] Demonstrate scenarios in confidence order: (1) CANDIDATE_ABSENT, (2) MULTIPLE_PERSONS, (3) FACE_MISMATCH + CONFIRMED_SEAT_SWAP as the "wow" moment, (4) GAZE + AUDIO fusion, (5) show confusion matrix populated live.
+- [ ] Show degradation status tile live (FPS → active modalities) as a scalability/robustness narrative.
+- [ ] Have fallback video queued and ready to play within 30 seconds if live demo fails.
+- [ ] Bring a portable WiFi router (~₹500-1,000) for the malpractice trigger app to work from mobile devices on the same LAN.
+- [ ] Bring a USB webcam (~₹1,500) as CCTV camera fallback if venue lacks an IP camera.

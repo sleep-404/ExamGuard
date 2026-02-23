@@ -379,7 +379,7 @@ Dashboard shows degradation mode per terminal. Degradation is visible to the ope
 | Plan A (primary) | WinPython portable on USB | No admin needed, no install | Larger USB payload |
 | Plan B (fallback) | PyInstaller `--onedir` | Single directory copy | May hit AV false positives |
 
-Decide after Day 0 test on target machine. Include VC++ Redistributable + DirectX runtime on USB as insurance.
+Decide after pre-flight test on target machine. Include VC++ Redistributable + DirectX runtime on USB as insurance.
 
 ### Pre-Flight Diagnostic Script
 
@@ -410,23 +410,72 @@ App-level sync: RTT/2 offset estimation on every heartbeat, median of last 5 rea
 
 ---
 
-## Implementation Schedule (10 Days)
+## Implementation Phases
 
-| Day | Focus | Exit Criterion |
-|-----|-------|----------------|
-| **Day 0** | **GO/NO-GO:** Pre-flight diagnostic on non-dev Windows machine. Test WinPython portable and PyInstaller `--onedir`. Confirm target OS. Include VC++ Redist + DirectX on USB. | Deployment method confirmed or pivot |
-| **Day 1** | Webcam capture + 3 threads + BlazeFace + CLAHE + `--source` flag + MOSSE tracker. Local HTTP/WS API skeleton for browser UI. Create `exam_content.json` (10 MCQs). Episode event schema. 640x480 capture. | Face boxes on live feed with tracking |
-| **Day 2** | Enrollment (5 embeddings, quality gates, Force Proceed after 3 failures). Face verification (3-zone hysteresis). Push enrollment embeddings to edge. Edge server start (FastAPI, SQLite WAL, async single-writer queue). Browser enrollment UI. | Enroll → verify + embeddings on edge |
-| **Day 3** | Multi-face + absence + gaze (baseline calibration: 10s median+MAD). FPS degradation modes. Episode events to edge. Cross-terminal seat-swap on edge. | All core detections + seat-swap working |
-| **Day 4** | **HARD DEADLINE: vertical slice with 3 terminals.** Events flow terminal → edge → dashboard. Discover LAN/SQLite/firewall issues. Silero VAD (10s threshold) — cut if unstable. App-level time sync. Store-and-forward (JSONL spool). Hash-chaining. | 3 terminals → edge → dashboard with time sync |
-| **Day 5** | Dashboard: terminal grid (30 tiles via SSE), alert feed, terminal detail, degradation status. Browser exam UI (MCQs, timer). Exam start/stop broadcast. Ground truth logger. Malpractice trigger app. | **MINIMUM VIABLE DEMO works end-to-end** |
-| **Day 6** | Evidence snapshot push (JPEG to edge). Common-mode audio rejection. Evidence viewer. 3 fusion rules on edge. CCTV display stub (RTSP/USB + motion overlay). | Dashboard shows evidence + fusion + CCTV |
-| **Day 7** | Confusion matrix (1:1 greedy matching, ±15s window). Post-exam summary. Stress test 5-10 terminals. Threshold tuning. Scalability one-pager. | Scoring works, stable under load |
-| **Day 8** | Multi-terminal stress test (10+ terminals simulated). Threshold tuning on target hardware. Detect-track-verify optimization if FPS insufficient. | Stable under load |
-| **Day 9** | Calibration exam: run ALL planned malpractice scenarios. Record raw scores. Tune thresholds. Test degradation modes. **Record fallback demo video** (3-min walkthrough — NON-OPTIONAL). | Thresholds tuned, fallback video recorded |
-| **Day 10** | **Demo rehearsal only.** Practice scenarios in confidence order. Verify confusion matrix output. Prepare USB backups of both packaging options. | Ready for demo |
+### Phase 0: Pre-Flight (Go/No-Go Gate)
 
-**Milestone Gate:** If Tier 0 items (preflight, core pipeline, enrollment, edge server, dashboard, 3-terminal vertical slice) are not complete by end of Day 5, cut ALL Tier 2+ items and focus exclusively on core 4 alert types + seat-swap + confusion matrix.
+Pre-flight diagnostic on a non-dev Windows machine. Test WinPython portable and PyInstaller `--onedir`. Confirm target OS. Include VC++ Redist + DirectX on USB.
+
+**Exit criterion:** Deployment method confirmed or pivot.
+
+### Phase 1: Core Pipeline
+
+- Webcam capture + 3 threads + BlazeFace + CLAHE + `--source` flag + MOSSE tracker
+- Local HTTP/WS API skeleton for browser UI
+- Create `exam_content.json` (10 MCQs), episode event schema, 640x480 capture
+- Enrollment (5 embeddings, quality gates, Force Proceed after 3 failures)
+- Face verification (3-zone hysteresis)
+- Push enrollment embeddings to edge
+- Edge server start (FastAPI, SQLite WAL, async single-writer queue)
+- Browser enrollment UI
+
+**Exit criterion:** Enroll → verify working, embeddings on edge.
+
+### Phase 2: Detection & Vertical Slice (Hard Deadline)
+
+- Multi-face + absence + gaze (baseline calibration: 10s median+MAD)
+- FPS degradation modes
+- Episode events to edge, cross-terminal seat-swap on edge
+- Silero VAD (10s threshold) — cut if unstable
+- App-level time sync, store-and-forward (JSONL spool), hash-chaining
+- **Vertical slice with 3 terminals** — events flow terminal → edge → dashboard. Discover LAN/SQLite/firewall issues here.
+
+**Exit criterion:** 3 terminals → edge → dashboard with time sync.
+
+### Phase 3: Dashboard & Exam UI
+
+- Dashboard: terminal grid (30 tiles via SSE), alert feed, terminal detail, degradation status
+- Browser exam UI (MCQs, timer)
+- Exam start/stop broadcast
+- Ground truth logger + malpractice trigger app
+
+**Exit criterion:** Minimum viable demo works end-to-end.
+
+### Phase 4: Advanced Features
+
+- Evidence snapshot push (JPEG to edge)
+- Common-mode audio rejection
+- Evidence viewer
+- 3 fusion rules on edge
+- CCTV display stub (RTSP/USB + motion overlay)
+- Confusion matrix (1:1 greedy matching, ±15s window)
+- Post-exam summary
+- Scalability one-pager
+
+**Exit criterion:** Dashboard shows evidence + fusion + CCTV + scoring.
+
+### Phase 5: Validation & Demo Prep
+
+- Multi-terminal stress test (10+ terminals simulated)
+- Threshold tuning on target hardware
+- Calibration exam: run ALL planned malpractice scenarios, record raw scores, test degradation modes
+- **Record fallback demo video** (3-min walkthrough — non-optional)
+- Demo rehearsal: practice scenarios in confidence order, verify confusion matrix output
+- Prepare USB backups of both packaging options
+
+**Exit criterion:** Thresholds tuned, fallback video recorded, ready for demo.
+
+**Milestone Gate:** If Phase 0–2 items (preflight, core pipeline, enrollment, edge server, dashboard, 3-terminal vertical slice) are not complete by mid-sprint, cut ALL Phase 4 items and focus exclusively on core 4 alert types + seat-swap + confusion matrix.
 
 ---
 
@@ -455,7 +504,7 @@ Show detections in confidence order (highest-reliability first):
 - [ ] Dashboard on large screen/projector connected to edge server
 - [ ] Windows Defender exclusion configured on all terminals
 - [ ] All scenarios rehearsed in confidence order
-- [ ] `config.yaml` with tuned thresholds from Day 9 calibration
+- [ ] `config.yaml` with tuned thresholds from calibration runs
 - [ ] Scalability one-pager printed for jury
 
 ---
@@ -494,7 +543,7 @@ Show detections in confidence order (highest-reliability first):
 
 ## Multi-LLM Debate Consensus (Claude Opus + GPT-5.2 + Gemini 3 Pro)
 
-Full debate reports: `debate-report.md` (Round 1, 3 rounds), `debate-report-r2.md` (Round 2, 5 rounds — CONVERGED), `debate-report-r3.md` (Round 3, 3 rounds).
+Full debate report: `debate-report.md` (3 rounds of debate across Claude Opus, GPT-5.2, Gemini 3 Pro). Prior rounds archived in git history.
 
 **Consensus Level: FULL AGREEMENT** — All 3 models reached AGREE by Round 5 of Round 2 (auto-stopped). Round 3 added refinements with near-consensus.
 
@@ -544,7 +593,7 @@ Full debate reports: `debate-report.md` (Round 1, 3 rounds), `debate-report-r2.m
 25. **Push-based evidence:** terminal pushes encrypted JPEG to edge via HTTP POST on high/critical alerts only
 
 **Deployment:**
-26. **Day-0 packaging spike = existential go/no-go gate.** Test on non-dev target machine.
+26. **Pre-flight packaging spike = existential go/no-go gate.** Test on non-dev target machine.
 27. **Deployment decision tree:** Plan A = WinPython portable on USB (no admin needed); Plan B = PyInstaller; Plan C = bootable Linux (only if BIOS confirmed)
 28. Include **VC++ Redistributable + DirectX runtime** on USB as insurance
 
@@ -553,7 +602,7 @@ Full debate reports: `debate-report.md` (Round 1, 3 rounds), `debate-report-r2.m
 30. **FPS-based degradation modes:** ≥12fps = full; ≥7fps = shed gaze; ≥4fps = shed audio; <4fps = presence + multi-face only (SURVIVAL mode). Dashboard shows mode per terminal.
 31. **Enrollment quality gates:** face confidence >0.9, face >80px, blur/brightness checks, auto-retry with guidance. After 3 failures → "Force Proceed" → terminal flagged DEGRADED
 32. **Video file fallback:** `--source` CLI flag (device index or file path)
-33. Prepare **10 MCQ questions** as hardcoded JSON on Day 1
+33. Prepare **10 MCQ questions** as hardcoded JSON early in Phase 1
 34. **Exam start/stop synchronization** via edge broadcast to all terminals
 
 ### Round 3 Additions
@@ -565,11 +614,11 @@ Full debate reports: `debate-report.md` (Round 1, 3 rounds), `debate-report-r2.m
 39. **Audio common-mode rejection at edge** — buffer VAD events 500ms; if ≥3 terminals trigger simultaneously, suppress all but highest-amplitude source.
 40. **Hash-chaining re-added** — `hash_i = sha256(hash_{i-1} || canonical_json(event_i))` in JSONL. Directly addresses "tamper-proof logs" requirement.
 41. **Malpractice Trigger app** — mobile web page from edge server, 6 buttons + terminal selector. Actors press when staging event → microsecond-accurate ground truth.
-42. **Multi-terminal testing moved to Day 4-5** (from Day 8). LAN/SQLite/firewall issues discovered late are project-ending.
+42. **Multi-terminal testing moved early** (into Phase 2, not left to the end). LAN/SQLite/firewall issues discovered late are project-ending.
 43. **640x480 capture resolution** — explicit, non-negotiable on 4GB machines.
-44. **Both packaging options prepared** — WinPython portable + PyInstaller `--onedir`. Decide on-site after Day 0 test.
-45. **Fallback demo video on Day 9** — 3-min flawless walkthrough, non-optional insurance.
+44. **Both packaging options prepared** — WinPython portable + PyInstaller `--onedir`. Decide on-site after pre-flight test.
+45. **Fallback demo video before demo day** — 3-min flawless walkthrough, non-optional insurance.
 46. **SQLite single-writer async queue** on edge — batch flush every 250ms or 50 pending events. Prevents SQLITE_BUSY under 30-terminal concurrency.
 47. **Scalability one-pager** for jury — edge-server-per-hall model, ~₹25K/hall, metadata to district/state over 4G.
 48. **Demo in confidence order** — absence → multi-face → seat-swap wow → fusion → confusion matrix live.
-49. **Milestone gate** — if Tier 0 not complete by Day 5, cut ALL Tier 2+ items.
+49. **Milestone gate** — if Phases 0–2 not complete by mid-sprint, cut ALL Phase 4 items.
