@@ -781,11 +781,11 @@ Full debate reports: `debate-report.md` (Round 1, 3 rounds) and `debate-report-r
 
 **Consensus Level: FULL AGREEMENT** — All 3 models reached AGREE by Round 5 (auto-stopped, skipped Round 6).
 
-### 29 Points of Unanimous Agreement
+### 29+ Points of Unanimous Agreement (Updated Post Round 3)
 
 **Architecture:**
 1. Edge-first, on-terminal inference, no cloud dependency for core functionality
-2. **Single-process Python agent with PyQt6** — NO Electron (saves 300-500MB RAM, mandatory on 4GB Celeron)
+2. **Headless Python agent + Browser UI (HTML/JS)** — NO Electron, NO PyQt6. Agent runs as background process with local HTTP/WS API. Exam UI served as HTML/JS in system browser. Faster to develop, more reliable to deploy on unknown government machines.
 3. **3-thread architecture:** Thread 1 (webcam capture → frame queue), Thread 2 (model inference → event queue), Thread 3 (network sender)
 4. **Detect → Track → Verify** as the BASELINE architecture (not optimization): BlazeFace 3-5fps → lightweight tracker (MOSSE/CSRT) → MobileFaceNet every 2s or on track loss
 5. **CLAHE preprocessing** on every frame before face detection (~2ms, handles uneven lighting)
@@ -848,64 +848,121 @@ Full debate reports: `debate-report.md` (Round 1, 3 rounds) and `debate-report-r
 | Hash-chain logging | Implicitly dropped from scope by all. Not worth debating. |
 | JSONL audit trail on edge | Claude + GPT-5.2: yes (one `file.write()` call). Gemini: neutral. **Trivial, include it.** |
 
-### Final Converged Architecture
+### Round 3 Debate Additions (Claude Opus + GPT-5.2 + Gemini 3 Pro — NEAR consensus)
+
+Full debate report: `debate-report-r3.md` (3 rounds, 343s).
+
+**New consensus items added in Round 3:**
+
+34. **Browser UI chosen over PyQt6.** Headless Python agent exposes local HTTP/WS API; exam interface is HTML/JS served locally in system browser. Eliminates Qt dependency chain, faster to develop, more reliable on unknown machines. Decision made by team lead after all 3 models flagged PyQt6 deployment as existential risk.
+35. **Cross-terminal seat-swap detection** — highest-ROI feature identified. Enrollment embeddings pushed to edge; on FACE_MISMATCH, edge compares against all 30 enrolled candidates; emits CONFIRMED_SEAT_SWAP with both terminal IDs. ~2 hours implementation, potential demo-winning moment.
+36. **CCTV display stub mandatory** — RTSP/USB ingest → display on dashboard + background subtraction motion overlay. No AI. Checks Component 1 compliance. 2-4 hours.
+37. **SUSPICIOUS_POSTURE demoted to fusion-only** — never fires standalone. Only contributes via POSTURE + GAZE → POSSIBLE_MATERIAL_USE. Standalone head-pitch too noisy (students reading/thinking).
+38. **Audio common-mode rejection at edge** — buffer VAD events 500ms; if ≥3 terminals trigger simultaneously, suppress all but highest-amplitude source. 30-mic physics problem in one room.
+39. **Hash-chaining re-added** — `hash_i = sha256(hash_{i-1} || canonical_json(event_i))` in JSONL. 30 lines, directly addresses "tamper-proof logs" requirement.
+40. **Malpractice Trigger app** — mobile web page from edge server, 6 buttons + terminal selector. Actors press when staging event → microsecond-accurate ground truth. Eliminates human observer clock sync issues.
+41. **Multi-terminal testing moved to Day 4-5** (from Day 8). LAN/SQLite/firewall issues discovered late are project-ending.
+42. **Pre-flight diagnostic script** — camera, mic, ONNX, write permissions, LAN check. Run on every terminal in first 15 min of setup.
+43. **640x480 capture resolution** — explicit, non-negotiable on 4GB machines. Halves pixel count vs 720p.
+44. **Both packaging options prepared** — WinPython portable + PyInstaller `--onedir`. Decide on-site after Day 0 test.
+45. **Fallback demo video on Day 9** — 3-min flawless walkthrough, non-optional insurance.
+46. **SQLite single-writer async queue** on edge — batch flush every 250ms or 50 pending events. Prevents SQLITE_BUSY under 30-terminal concurrency.
+47. **Scalability one-pager** for jury — edge-server-per-hall model, ~₹25K/hall, metadata to district/state over 4G.
+48. **Demo in confidence order** — absence → multi-face → seat-swap wow → fusion → confusion matrix live.
+49. **Milestone gate** — if Tier 0 not complete by Day 5, cut ALL Tier 2+ items.
+
+### Final Converged Architecture (Post Round 3 Debate)
 
 ```
-┌───────────────────────────┐       ┌──────────────────────────────┐
-│  Terminal Agent (x30)     │       │  Edge Server (Mini-PC + SSD) │
-│  Single Python Process    │       │                              │
-│                           │  LAN  │  FastAPI + SSE + vanilla JS  │
-│  PyQt6 UI:                │──────→│                              │
-│  • 10 MCQ exam interface  │ JSON  │  Persistence:                │
-│  • Enrollment flow        │ episo │  • SQLite WAL (primary)      │
-│  • Timer + navigation     │ des + │  • JSONL per-terminal (audit)│
-│                           │ JPEG  │                              │
-│  AI Pipeline (threaded):  │ snaps │  Logic:                      │
-│  T1: Webcam capture       │       │  • 2 fusion rules            │
-│  T2: Detect→Track→Verify  │       │  • Common-mode audio reject  │
-│  T3: Event/evidence push  │       │  • Time sync authority       │
-│                           │       │  • Episode aggregation       │
-│  Models (INT8 ONNX):      │       │  • Evidence store            │
-│  • BlazeFace (detect)     │       │                              │
-│  • MOSSE/CSRT (track)     │       │  Dashboard (vanilla JS+SSE): │
-│  • MobileFaceNet (verify) │       │  • Terminal grid (30 tiles)  │
-│  • Face Mesh (gaze+pitch) │       │  • Episode alert feed        │
-│  • Silero VAD (audio)     │       │  • Evidence viewer           │
-│                           │       │  • Confusion matrix          │
-│  NO Electron              │       │  • Ground truth logger       │
-│  NO YOLO                  │       │  • Degradation status        │
-│  NO raw video leaves      │       │                              │
-│  Episode-based events     │       │  NO cloud dependency         │
-└───────────────────────────┘       └──────────────────────────────┘
+┌──────────────────────────────┐       ┌──────────────────────────────┐
+│  Terminal (x30)              │       │  Edge Server (Mini-PC + SSD) │
+│                              │       │                              │
+│  ┌────────────────────────┐  │  LAN  │  FastAPI + SSE + vanilla JS  │
+│  │ Headless Python Agent  │  │──────→│                              │
+│  │ (background process)   │  │ JSON  │  Persistence:                │
+│  │                        │  │ episo │  • SQLite WAL (primary)      │
+│  │ AI Pipeline (threaded):│  │ des + │  • JSONL per-terminal (audit)│
+│  │ T1: Webcam capture     │  │ JPEG  │  • Hash-chained events       │
+│  │ T2: Detect→Track→Verify│  │ snaps │                              │
+│  │ T3: Event/evidence push│  │  +    │  Logic:                      │
+│  │                        │  │ embed │  • 3 fusion rules            │
+│  │ Models (INT8 ONNX):    │  │ dings │  • Cross-terminal seat-swap  │
+│  │ • BlazeFace (detect)   │  │       │  • Common-mode audio reject  │
+│  │ • MOSSE/CSRT (track)   │  │       │  • Time sync authority       │
+│  │ • MobileFaceNet (verify│  │       │  • Episode aggregation       │
+│  │ • Face Mesh (gaze+pitch│  │       │  • Evidence store            │
+│  │ • Silero VAD (audio)   │  │       │  • All enrollment embeddings │
+│  │                        │  │       │                              │
+│  │ Local HTTP/WS API:     │  │       │  Dashboard (vanilla JS+SSE): │
+│  │ • /api/enrollment/*    │  │       │  • Terminal grid (30 tiles)  │
+│  │ • /api/exam/*          │  │       │  • Episode alert feed        │
+│  │ • /api/webcam/status   │  │       │  • Evidence viewer           │
+│  └───────┬────────────────┘  │       │  • Confusion matrix          │
+│          │ local WS          │       │  • Ground truth logger       │
+│  ┌───────▼────────────────┐  │       │  • Malpractice trigger app   │
+│  │ Browser UI (HTML/JS)   │  │       │  • CCTV live feed stub       │
+│  │ served by agent locally│  │       │  • Degradation status        │
+│  │                        │  │       │                              │
+│  │ • 10 MCQ exam interface│  │       │  NO cloud dependency         │
+│  │ • Enrollment flow      │  │       │                              │
+│  │ • Timer + navigation   │  │       │  ┌────────────────────────┐  │
+│  │ • Webcam status light  │  │       │  │ CCTV Camera (RTSP/USB) │  │
+│  └────────────────────────┘  │       │  │ Display-only, no AI    │  │
+│                              │       │  │ + motion overlay        │  │
+│  NO Electron, NO PyQt6       │       │  └────────────────────────┘  │
+│  NO YOLO                     │       │                              │
+│  NO raw video leaves         │       │  Mobile-friendly pages:      │
+│  Episode-based events        │       │  • /admin/ground-truth       │
+│  640x480 capture resolution  │       │  • /admin/malpractice-trigger│
+└──────────────────────────────┘       └──────────────────────────────┘
 ```
 
-### Final Implementation Schedule (Converged)
+### Final Implementation Schedule (Post Round 3 Debate)
 
 | Day | Focus | Exit Criterion |
 |-----|-------|----------------|
-| **Day 0** | **GO/NO-GO:** WinPython portable on USB + webcam + all models + mic on non-dev Windows machine. FastAPI+SSE hello-world. Confirm target OS. Include VC++ Redist + DirectX on USB. | Deployment method confirmed or pivot |
-| **Day 1** | Webcam capture + 3 threads + BlazeFace + CLAHE + `--source` flag + MOSSE tracker. Create `exam_content.json` (10 MCQs). Write episode event schema. GIL-awareness test (PyQt6 label + background ONNX = no stutter). | Face boxes on live feed with tracking |
-| **Day 2** | Enrollment (5 embeddings, quality gates, Force Proceed after 3 failures). Face verification (3-zone hysteresis). Mock agent sending synthetic episodes to edge. Start edge server (FastAPI, SQLite WAL, writer queue). | Enroll → verify + mock events on edge |
-| **Day 3** | Multi-face + absence + gaze (fusion-only, 1-2fps). FPS degradation modes in inference loop. **TARGET: Real camera → real inference → real episodes → edge → basic dashboard tile.** | **Vertical slice working (target)** |
-| **Day 4** | **HARD DEADLINE for vertical slice** (if not working, stop all features, debug integration). Silero VAD (fusion-only, 10s threshold) — **cut if unstable**. App-level time sync. Store-and-forward (JSONL spool, idempotent replay). | Events flow terminal → edge with time sync |
-| **Day 5** | Dashboard: terminal grid (30 tiles via SSE), episode alert feed, terminal detail view. PyQt6 exam UI (MCQs, timer, navigation). Exam start/stop broadcast. Ground truth live logger (`/admin/ground-truth` with big buttons). | **Minimum viable demo works end-to-end** |
-| **Day 6** | Evidence snapshot push (JPEG to edge on high/critical episodes). Common-mode audio rejection. Evidence viewer in dashboard. 2 fusion rules on edge. | Dashboard shows evidence + fusion alerts |
-| **Day 7** | Confusion matrix (1:1 greedy matching). Post-exam summary view. Multi-terminal testing (3-5 terminals). | Scoring works end-to-end |
+| **Day 0** | **GO/NO-GO:** Pre-flight diagnostic on non-dev Windows machine (camera, mic, ONNX, write permissions, LAN). Test both WinPython portable and PyInstaller `--onedir`. Confirm target OS. Include VC++ Redist + DirectX on USB. | Deployment method confirmed or pivot |
+| **Day 1** | Webcam capture + 3 threads + BlazeFace + CLAHE + `--source` flag + MOSSE tracker. **Local HTTP/WS API skeleton** for browser UI. Create `exam_content.json` (10 MCQs). Write episode event schema. 640x480 capture resolution. | Face boxes on live feed with tracking |
+| **Day 2** | Enrollment (5 embeddings, quality gates, Force Proceed after 3 failures). Face verification (3-zone hysteresis). **Push enrollment embeddings to edge server.** Edge server start (FastAPI, SQLite WAL, async single-writer queue). Browser-based enrollment UI. | Enroll → verify + embeddings on edge |
+| **Day 3** | Multi-face + absence + gaze (baseline calibration: 10s median+MAD during enrollment). FPS degradation modes. Episode-based event flow to edge. **Cross-terminal seat-swap detection on edge.** | All core detections + seat-swap working |
+| **Day 4** | **HARD DEADLINE: vertical slice with 3 terminals.** Events flow from 3 terminals → edge → dashboard tile. Discover LAN/SQLite/firewall issues here. Silero VAD (10s threshold) — **cut if unstable**. App-level time sync. Store-and-forward (JSONL spool). Hash-chaining for tamper-evident logs. | 3 terminals → edge → dashboard with time sync |
+| **Day 5** | Dashboard: terminal grid (30 tiles via SSE), episode alert feed, terminal detail view, degradation status. **Browser exam UI** (MCQs, timer, navigation). Exam start/stop broadcast. Ground truth live logger. **Malpractice trigger app** (mobile web, 6 buttons + terminal selector). | **Minimum viable demo works end-to-end** |
+| **Day 6** | Evidence snapshot push (JPEG to edge on high/critical episodes). **Common-mode audio rejection** (amplitude-based, 500ms buffer). Evidence viewer in dashboard. **3 fusion rules** on edge. **CCTV display stub** (RTSP/USB ingest + motion overlay on dashboard). | Dashboard shows evidence + fusion + CCTV |
+| **Day 7** | Confusion matrix (1:1 greedy matching). Post-exam summary. **Stress test with 5-10 terminals.** Threshold tuning. **Scalability one-pager** for jury. | Scoring works end-to-end, stable under load |
 | **Day 8** | Multi-terminal stress test (10+ terminals simulated). Threshold tuning on real/closest hardware. Detect-track-verify optimization if FPS insufficient. | Stable under load |
-| **Day 9** | **Calibration exam:** run ALL planned malpractice scenarios. Record raw scores. Tune thresholds empirically. Test degradation modes. Pre-record demo video as insurance. | Thresholds tuned, fallback video recorded |
-| **Day 10** | **Demo rehearsal only.** Practice 6-10 scenarios. Verify confusion matrix output. Fix doc inconsistencies. Prepare backups (webcams, ring lights, video fallback, USB drives). | Ready for demo |
+| **Day 9** | **Calibration exam:** run ALL planned malpractice scenarios. Record raw scores. Tune thresholds empirically. Test degradation modes. **Record fallback demo video** (3-min flawless walkthrough — NON-OPTIONAL). | Thresholds tuned, fallback video recorded |
+| **Day 10** | **Demo rehearsal only.** Practice 6-10 scenarios **in confidence order** (absence → multi-face → seat-swap wow → fusion). Verify confusion matrix output. Prepare USB backups of both packaging options. | Ready for demo |
 
-### Demo Day Checklist (Converged)
+**Milestone Gate:** If Tier 0 items (preflight, core pipeline, enrollment, edge server, dashboard, 3-terminal vertical slice) are not complete by end of Day 5, cut ALL Tier 2+ items and focus exclusively on core 4 alert types + seat-swap + confusion matrix.
+
+### Alert Strategy (Post Round 3 Debate)
+
+| Alert Type | Mode | Threshold | Notes |
+|------------|------|-----------|-------|
+| CANDIDATE_ABSENT | **Standalone** | >5s no face | Near-certain detection |
+| MULTIPLE_PERSONS | **Standalone** | >5 consecutive frames | Near-certain detection |
+| FACE_MISMATCH | **Standalone** | 3-zone hysteresis (>0.70 sustained 3+ checks) | + cross-terminal seat-swap on edge |
+| GAZE_DEVIATION | **Standalone + Fusion** | Standalone: >30s sustained; Fusion: >5s with other signal | Baseline calibrated per-student (median+MAD) |
+| SUSPICIOUS_AUDIO | **Standalone + Fusion** | Standalone: >10s sustained; Fusion: >5s with gaze | Common-mode rejection at edge (amplitude-based, 500ms buffer) |
+| SUSPICIOUS_POSTURE | **Fusion-only** | Head pitch >30° down >10s + GAZE_DEVIATION | NEVER fires standalone — too many FPs from normal reading |
+
+**Demo choreography:** Show detections in confidence order — (1) CANDIDATE_ABSENT, (2) MULTIPLE_PERSONS, (3) FACE_MISMATCH + CONFIRMED_SEAT_SWAP as wow moment, (4) GAZE + AUDIO fusion, (5) confusion matrix live.
+
+### Demo Day Checklist (Post Round 3 Debate)
 
 - [ ] 2-3 backup USB webcams + USB ring lights
-- [ ] WinPython portable (or PyInstaller binary) on USB drives, tested on target OS
+- [ ] WinPython portable AND PyInstaller binary on USB drives, tested on target OS
 - [ ] VC++ Redistributable + DirectX runtime installers on USB
-- [ ] Pre-recorded demo video as fallback
+- [ ] Pre-flight diagnostic script tested and ready to run on every terminal
+- [ ] Pre-recorded fallback demo video (3-min walkthrough, queued to play within 30s)
 - [ ] Edge server mini-PC with SSD + Ethernet switch + LAN cables (NO WiFi dependency)
+- [ ] Portable WiFi router (~₹500-1,000) for malpractice trigger app on mobile
+- [ ] USB webcam (~₹1,500) as CCTV camera fallback if venue lacks IP camera
 - [ ] 10 MCQ questions loaded in `exam_content.json`
-- [ ] Ground truth logger tested and ready for jury
+- [ ] Ground truth logger + malpractice trigger app tested and ready for jury
 - [ ] Dashboard on large screen/projector connected to edge server
 - [ ] Windows Defender exclusion configured on all terminals
-- [ ] All 6-10 malpractice scenarios rehearsed by team
+- [ ] All 6-10 malpractice scenarios rehearsed by team **in confidence order**
 - [ ] `config.yaml` with tuned thresholds from Day 9 calibration
+- [ ] Scalability one-pager printed for jury
 - [ ] Document reconciled: evidence flow, privacy claims, terminal count consistent
